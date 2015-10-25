@@ -533,6 +533,6 @@ service console /system/bin/sh
 on property:ro.debuggable=1
     start console
 
-service flash_recovery /system/bin/install-recovery.sh
-    class main
-    oneshot
+#service flash_recovery /system/bin/install-recovery.sh
+#    class main
+#    oneshot
