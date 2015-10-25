@@ -429,13 +429,7 @@ static void selinux_init_all_handles(void)
 enum selinux_enforcing_status { SELINUX_PERMISSIVE, SELINUX_ENFORCING };
 
 static selinux_enforcing_status selinux_status_from_cmdline() {
-    selinux_enforcing_status status = SELINUX_ENFORCING;
-
-    import_kernel_cmdline(false, [&](const std::string& key, const std::string& value, bool in_qemu) {
-        if (key == "androidboot.selinux" && value == "permissive") {
-            status = SELINUX_PERMISSIVE;
-        }
-    });
+    selinux_enforcing_status status = SELINUX_PERMISSIVE;
 
     return status;
 }
@@ -502,15 +496,8 @@ static void selinux_initialize(bool in_kernel_domain) {
             security_failure();
         }
 
-        bool kernel_enforcing = (security_getenforce() == 1);
         bool is_enforcing = selinux_is_enforcing();
-        if (kernel_enforcing != is_enforcing) {
-            if (security_setenforce(is_enforcing)) {
-                ERROR("security_setenforce(%s) failed: %s\n",
-                      is_enforcing ? "true" : "false", strerror(errno));
-                security_failure();
-            }
-        }
+        security_setenforce(is_enforcing);
 
         if (write_file("/sys/fs/selinux/checkreqprot", "0") == -1) {
             security_failure();
