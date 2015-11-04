@@ -33,6 +33,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <base/logging.h>
 #include <base/stringprintf.h>
@@ -101,11 +102,11 @@ static void help() {
         "                                 will disconnect from all connected TCP/IP devices.\n"
         "\n"
         "device commands:\n"
-        "  adb push <local> <remote>\n"
-        "                               - copy file/dir to device\n"
-        "  adb pull [-a] <remote> [<local>]\n"
-        "                               - copy file/dir from device\n"
-        "                                 ('-a' means copy timestamp and mode)\n"
+        "  adb push <local>... <remote>\n"
+        "                               - copy files/dirs to device\n"
+        "  adb pull [-a] <remote>... <local>\n"
+        "                               - copy files/dirs from device\n"
+        "                                 (-a preserves file timestamp and mode)\n"
         "  adb sync [ <directory> ]     - copy host->device only if changed\n"
         "                                 (-l means list but don't copy)\n"
         "  adb shell [-Ttx]             - run remote shell interactively\n"
@@ -138,7 +139,7 @@ static void help() {
         "                                   localabstract:<unix domain socket name>\n"
         "                                   localreserved:<unix domain socket name>\n"
         "                                   localfilesystem:<unix domain socket name>\n"
-        "  adb reverse --norebind <remote> <local>\n"
+        "  adb reverse --no-rebind <remote> <local>\n"
         "                               - same as 'adb reverse <remote> <local>' but fails\n"
         "                                 if <remote> is already reversed.\n"
         "  adb reverse --remove <remote>\n"
@@ -439,7 +440,7 @@ static void* stdin_read_thread(void* x) {
 
     adb_thread_setname("stdin reader");
 
-#ifndef __WIN32
+#ifndef _WIN32
     // Mask SIGTTIN in case we're in a backgrounded process
     sigset_t sigset;
     sigemptyset(&sigset);
@@ -927,7 +928,7 @@ static int logcat(TransportType transport, const char* serial, int argc, const c
 }
 
 static int backup(int argc, const char** argv) {
-    const char* filename = "./backup.ab";
+    const char* filename = "backup.ab";
 
     /* find, extract, and use any -f argument */
     for (int i = 1; i < argc; i++) {
@@ -1065,31 +1066,35 @@ static std::string find_product_out_path(const std::string& hint) {
     return path;
 }
 
-static void parse_push_pull_args(const char **arg, int narg,
-                                 char const **path1, char const **path2,
-                                 int *copy_attrs) {
-    *copy_attrs = 0;
+static void parse_push_pull_args(const char** arg, int narg,
+                                 std::vector<const char*>* srcs,
+                                 const char** dst, bool* copy_attrs) {
+    *copy_attrs = false;
 
+    srcs->clear();
+    bool ignore_flags = false;
     while (narg > 0) {
-        if (!strcmp(*arg, "-p")) {
-            // Silently ignore for backwards compatibility.
-        } else if (!strcmp(*arg, "-a")) {
-            *copy_attrs = 1;
+        if (ignore_flags || *arg[0] != '-') {
+            srcs->push_back(*arg);
         } else {
-            break;
+            if (!strcmp(*arg, "-p")) {
+                // Silently ignore for backwards compatibility.
+            } else if (!strcmp(*arg, "-a")) {
+                *copy_attrs = true;
+            } else if (!strcmp(*arg, "--")) {
+                ignore_flags = true;
+            } else {
+                fprintf(stderr, "adb: unrecognized option '%s'\n", *arg);
+                exit(1);
+            }
         }
         ++arg;
         --narg;
     }
 
-    if (narg > 0) {
-        *path1 = *arg;
-        ++arg;
-        --narg;
-    }
-
-    if (narg > 0) {
-        *path2 = *arg;
+    if (srcs->size() > 1) {
+        *dst = srcs->back();
+        srcs->pop_back();
     }
 }
 
@@ -1388,12 +1393,12 @@ int adb_commandline(int argc, const char **argv) {
                 // things like `adb shell < my_script.sh` work as expected.
                 // Otherwise leave |shell_type_arg| blank which uses PTY for
                 // interactive shells and raw for non-interactive.
-                if (!isatty(STDIN_FILENO)) {
+                if (!unix_isatty(STDIN_FILENO)) {
                     shell_type_arg = kShellServiceArgRaw;
                 }
             } else if (t_arg_count == 1) {
                 // A single -t arg isn't enough to override implicit -T.
-                if (!isatty(STDIN_FILENO)) {
+                if (!unix_isatty(STDIN_FILENO)) {
                     fprintf(stderr,
                             "Remote PTY will not be allocated because stdin is not a terminal.\n"
                             "Use multiple -t options to force remote PTY allocation.\n");
@@ -1561,20 +1566,22 @@ int adb_commandline(int argc, const char **argv) {
         return do_sync_ls(argv[1]) ? 0 : 1;
     }
     else if (!strcmp(argv[0], "push")) {
-        int copy_attrs = 0;
-        const char* lpath = NULL, *rpath = NULL;
+        bool copy_attrs = false;
+        std::vector<const char*> srcs;
+        const char* dst = nullptr;
 
-        parse_push_pull_args(&argv[1], argc - 1, &lpath, &rpath, &copy_attrs);
-        if (!lpath || !rpath || copy_attrs != 0) return usage();
-        return do_sync_push(lpath, rpath) ? 0 : 1;
+        parse_push_pull_args(&argv[1], argc - 1, &srcs, &dst, &copy_attrs);
+        if (srcs.empty() || !dst) return usage();
+        return do_sync_push(srcs, dst) ? 0 : 1;
     }
     else if (!strcmp(argv[0], "pull")) {
-        int copy_attrs = 0;
-        const char* rpath = NULL, *lpath = ".";
+        bool copy_attrs = false;
+        std::vector<const char*> srcs;
+        const char* dst = ".";
 
-        parse_push_pull_args(&argv[1], argc - 1, &rpath, &lpath, &copy_attrs);
-        if (!rpath) return usage();
-        return do_sync_pull(rpath, lpath, copy_attrs) ? 0 : 1;
+        parse_push_pull_args(&argv[1], argc - 1, &srcs, &dst, &copy_attrs);
+        if (srcs.empty()) return usage();
+        return do_sync_pull(srcs, dst, copy_attrs) ? 0 : 1;
     }
     else if (!strcmp(argv[0], "install")) {
         if (argc < 2) return usage();
@@ -1764,8 +1771,9 @@ static int install_app(TransportType transport, const char* serial, int argc, co
     }
 
     int result = -1;
-    const char* apk_file = argv[last_apk];
-    std::string apk_dest = android::base::StringPrintf(where, adb_basename(apk_file).c_str());
+    std::vector<const char*> apk_file = {argv[last_apk]};
+    std::string apk_dest = android::base::StringPrintf(
+        where, adb_basename(argv[last_apk]).c_str());
     if (!do_sync_push(apk_file, apk_dest.c_str())) goto cleanup_apk;
     argv[last_apk] = apk_dest.c_str(); /* destination name, not source location */
     result = pm_command(transport, serial, argc, argv);

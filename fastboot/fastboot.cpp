@@ -44,6 +44,7 @@
 #include <unistd.h>
 
 #include <base/parseint.h>
+#include <base/strings.h>
 #include <sparse/sparse.h>
 #include <ziparchive/zip_archive.h>
 
@@ -261,6 +262,11 @@ static void usage() {
             "                                           partitions.\n"
             "  flashing get_unlock_ability              Queries bootloader to see if the\n"
             "                                           device is unlocked.\n"
+            "  flashing get_unlock_bootloader_nonce     Queries the bootloader to get the\n"
+            "                                           unlock nonce.\n"
+            "  flashing unlock_bootloader <request>     Issue unlock bootloader using request.\n"
+            "  flashing lock_bootloader                 Locks the bootloader to prevent\n"
+            "                                           bootloader version rollback.\n"
             "  erase <partition>                        Erase a flash partition.\n"
             "  format[:[<fs type>][:[<size>]] <partition>\n"
             "                                           Format a flash partition. Can\n"
@@ -570,12 +576,17 @@ static struct sparse_file **load_sparse_files(int fd, int max_size)
 
 static int64_t get_target_sparse_limit(usb_handle* usb) {
     std::string max_download_size;
-    if (!fb_getvar(usb, "max-download-size", &max_download_size)) {
+    if (!fb_getvar(usb, "max-download-size", &max_download_size) || max_download_size.empty()) {
+        fprintf(stderr, "target didn't report max-download-size\n");
         return 0;
     }
 
+    // Some bootloaders (angler, for example) send spurious whitespace too.
+    max_download_size = android::base::Trim(max_download_size);
+
     uint64_t limit;
     if (!android::base::ParseUint(max_download_size.c_str(), &limit)) {
+        fprintf(stderr, "couldn't parse max-download-size '%s'\n", max_download_size.c_str());
         return 0;
     }
     if (limit > 0) {
@@ -612,8 +623,12 @@ static int64_t get_sparse_limit(usb_handle* usb, int64_t size) {
 // Until we get lazy inode table init working in make_ext4fs, we need to
 // erase partitions of type ext4 before flashing a filesystem so no stale
 // inodes are left lying around.  Otherwise, e2fsck gets very upset.
-static bool needs_erase(usb_handle* usb, const char* part) {
-    return !fb_format_supported(usb, part, nullptr);
+static bool needs_erase(usb_handle* usb, const char* partition) {
+    std::string partition_type;
+    if (!fb_getvar(usb, std::string("partition-type:") + partition, &partition_type)) {
+        return false;
+    }
+    return partition_type == "ext4";
 }
 
 static int load_buf_fd(usb_handle* usb, int fd, struct fastboot_buffer* buf) {
@@ -788,7 +803,28 @@ static void do_flashall(usb_handle* usb, int erase_first) {
 #define skip(n) do { argc -= (n); argv += (n); } while (0)
 #define require(n) do { if (argc < (n)) {usage(); exit(1);}} while (0)
 
-static int do_oem_command(int argc, char** argv) {
+static int do_bypass_unlock_command(int argc, char **argv)
+{
+    if (argc <= 2) return 0;
+    skip(2);
+
+    /*
+     * Process unlock_bootloader, we have to load the message file
+     * and send that to the remote device.
+     */
+    require(1);
+
+    int64_t sz;
+    void* data = load_file(*argv, &sz);
+    if (data == nullptr) die("could not load '%s': %s", *argv, strerror(errno));
+    fb_queue_download("unlock_message", data, sz);
+    fb_queue_command("flashing unlock_bootloader", "unlocking bootloader");
+    skip(1);
+    return 0;
+}
+
+static int do_oem_command(int argc, char **argv)
+{
     char command[256];
     if (argc <= 1) return 0;
 
@@ -887,7 +923,7 @@ static void fb_perform_format(usb_handle* usb,
         partition_size = size_override;
     }
 
-    gen = fs_get_generator(partition_type.c_str());
+    gen = fs_get_generator(partition_type);
     if (!gen) {
         if (skip_if_not_supported) {
             fprintf(stderr, "Erase successful, but not automatically formatting.\n");
@@ -898,6 +934,10 @@ static void fb_perform_format(usb_handle* usb,
                 partition_type.c_str());
         return;
     }
+
+    // Some bootloaders (hammerhead, for example) use implicit hex.
+    // This code used to use strtol with base 16.
+    if (!android::base::StartsWith(partition_size, "0x")) partition_size = "0x" + partition_size;
 
     int64_t size;
     if (!android::base::ParseInt(partition_size.c_str(), &size)) {
@@ -1057,8 +1097,11 @@ int main(int argc, char **argv)
         } else if(!strcmp(*argv, "erase")) {
             require(2);
 
-            if (!fb_format_supported(usb, argv[1], nullptr)) {
-                fprintf(stderr, "******** Did you mean to fastboot format this partition?\n");
+            std::string partition_type;
+            if (fb_getvar(usb, std::string("partition-type:") + argv[1], &partition_type) &&
+                fs_get_generator(partition_type) != nullptr) {
+                fprintf(stderr, "******** Did you mean to fastboot format this %s partition?\n",
+                        partition_type.c_str());
             }
 
             fb_queue_erase(argv[1]);
@@ -1189,12 +1232,18 @@ int main(int argc, char **argv)
             wants_reboot = 1;
         } else if(!strcmp(*argv, "oem")) {
             argc = do_oem_command(argc, argv);
-        } else if(!strcmp(*argv, "flashing") && argc == 2) {
-            if(!strcmp(*(argv+1), "unlock") || !strcmp(*(argv+1), "lock")
-               || !strcmp(*(argv+1), "unlock_critical")
-               || !strcmp(*(argv+1), "lock_critical")
-               || !strcmp(*(argv+1), "get_unlock_ability")) {
-              argc = do_oem_command(argc, argv);
+        } else if(!strcmp(*argv, "flashing")) {
+            if (argc == 2 && (!strcmp(*(argv+1), "unlock") ||
+                              !strcmp(*(argv+1), "lock") ||
+                              !strcmp(*(argv+1), "unlock_critical") ||
+                              !strcmp(*(argv+1), "lock_critical") ||
+                              !strcmp(*(argv+1), "get_unlock_ability") ||
+                              !strcmp(*(argv+1), "get_unlock_bootloader_nonce") ||
+                              !strcmp(*(argv+1), "lock_bootloader"))) {
+                argc = do_oem_command(argc, argv);
+            } else
+            if (argc == 3 && !strcmp(*(argv+1), "unlock_bootloader")) {
+                argc = do_bypass_unlock_command(argc, argv);
             } else {
               usage();
               return 1;
