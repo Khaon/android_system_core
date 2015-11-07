@@ -590,3 +590,4 @@ service daemonsu /su/bin/daemonsu --auto-daemon
     class late_start
     user root
     oneshot
+    seclabel u:r:init:s0
