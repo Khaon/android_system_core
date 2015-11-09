@@ -386,7 +386,7 @@ static void process_kernel_dt() {
 
     struct dirent *dp;
     while ((dp = readdir(dir.get())) != NULL) {
-        if (dp->d_type != DT_REG || !strcmp(dp->d_name, "compatible")) {
+        if (dp->d_type != DT_REG || !strcmp(dp->d_name, "compatible") || !strcmp(dp->d_name, "name")) {
             continue;
         }
 
@@ -533,7 +533,8 @@ int main(int argc, char** argv) {
         mkdir("/dev/pts", 0755);
         mkdir("/dev/socket", 0755);
         mount("devpts", "/dev/pts", "devpts", 0, NULL);
-        mount("proc", "/proc", "proc", 0, NULL);
+        #define MAKE_STR(x) __STRING(x)
+        mount("proc", "/proc", "proc", 0, "hidepid=2,gid=" MAKE_STR(AID_READPROC));
         mount("sysfs", "/sys", "sysfs", 0, NULL);
     }
 
