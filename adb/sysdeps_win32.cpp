@@ -35,6 +35,7 @@
 #include <base/logging.h>
 #include <base/stringprintf.h>
 #include <base/strings.h>
+#include <base/utf8.h>
 
 #include "adb.h"
 
@@ -2546,15 +2547,14 @@ int unix_isatty(int fd) {
     return _get_console_handle(fd) ? 1 : 0;
 }
 
-// Read an input record from the console; one that should be processed.
-static bool _get_interesting_input_record_uncached(const HANDLE console,
-    INPUT_RECORD* const input_record) {
+// Get the next KEY_EVENT_RECORD that should be processed.
+static bool _get_key_event_record(const HANDLE console, INPUT_RECORD* const input_record) {
     for (;;) {
         DWORD read_count = 0;
         memset(input_record, 0, sizeof(*input_record));
         if (!ReadConsoleInputA(console, input_record, 1, &read_count)) {
-            D("_get_interesting_input_record_uncached: ReadConsoleInputA() "
-              "failed: %s\n", SystemErrorCodeToString(GetLastError()).c_str());
+            D("_get_key_event_record: ReadConsoleInputA() failed: %s\n",
+              SystemErrorCodeToString(GetLastError()).c_str());
             errno = EIO;
             return false;
         }
@@ -2578,28 +2578,6 @@ static bool _get_interesting_input_record_uncached(const HANDLE console,
             return true;
         }
     }
-}
-
-// Cached input record (in case _console_read() is passed a buffer that doesn't
-// have enough space to fit wRepeatCount number of key sequences). A non-zero
-// wRepeatCount indicates that a record is cached.
-static INPUT_RECORD _win32_input_record;
-
-// Get the next KEY_EVENT_RECORD that should be processed.
-static KEY_EVENT_RECORD* _get_key_event_record(const HANDLE console) {
-    // If nothing cached, read directly from the console until we get an
-    // interesting record.
-    if (_win32_input_record.Event.KeyEvent.wRepeatCount == 0) {
-        if (!_get_interesting_input_record_uncached(console,
-            &_win32_input_record)) {
-            // There was an error, so make sure wRepeatCount is zero because
-            // that signifies no cached input record.
-            _win32_input_record.Event.KeyEvent.wRepeatCount = 0;
-            return NULL;
-        }
-    }
-
-    return &_win32_input_record.Event.KeyEvent;
 }
 
 static __inline__ bool _is_shift_pressed(const DWORD control_key_state) {
@@ -2946,16 +2924,34 @@ size_t _escape_prefix(char* const buf, const size_t len) {
     return len + 1;
 }
 
-// Writes to buffer buf (of length len), returning number of bytes written or
-// -1 on error. Never returns zero because Win32 consoles are never 'closed'
-// (as far as I can tell).
+// Internal buffer to satisfy future _console_read() calls.
+static auto& g_console_input_buffer = *new std::vector<char>();
+
+// Writes to buffer buf (of length len), returning number of bytes written or -1 on error. Never
+// returns zero on console closure because Win32 consoles are never 'closed' (as far as I can tell).
 static int _console_read(const HANDLE console, void* buf, size_t len) {
     for (;;) {
-        KEY_EVENT_RECORD* const key_event = _get_key_event_record(console);
-        if (key_event == NULL) {
+        // Read of zero bytes should not block waiting for something from the console.
+        if (len == 0) {
+            return 0;
+        }
+
+        // Flush as much as possible from input buffer.
+        if (!g_console_input_buffer.empty()) {
+            const int bytes_read = std::min(len, g_console_input_buffer.size());
+            memcpy(buf, g_console_input_buffer.data(), bytes_read);
+            const auto begin = g_console_input_buffer.begin();
+            g_console_input_buffer.erase(begin, begin + bytes_read);
+            return bytes_read;
+        }
+
+        // Read from the actual console. This may block until input.
+        INPUT_RECORD input_record;
+        if (!_get_key_event_record(console, &input_record)) {
             return -1;
         }
 
+        KEY_EVENT_RECORD* const key_event = &input_record.Event.KeyEvent;
         const WORD vk = key_event->wVirtualKeyCode;
         const CHAR ch = key_event->uChar.AsciiChar;
         const DWORD control_key_state = _normalize_altgr_control_key_state(
@@ -3133,27 +3129,13 @@ static int _console_read(const HANDLE console, void* buf, size_t len) {
                 break;
 
                 case 0x32:          // 2
+                case 0x33:          // 3
+                case 0x34:          // 4
+                case 0x35:          // 5
                 case 0x36:          // 6
+                case 0x37:          // 7
+                case 0x38:          // 8
                 case VK_OEM_MINUS:  // -_
-                {
-                    seqbuflen = _get_control_character(seqbuf, key_event,
-                        control_key_state);
-
-                    // If Alt is pressed and it isn't Ctrl-Alt-ShiftUp, then
-                    // prefix with escape.
-                    if (_is_alt_pressed(control_key_state) &&
-                        !(_is_ctrl_pressed(control_key_state) &&
-                        !_is_shift_pressed(control_key_state))) {
-                        seqbuflen = _escape_prefix(seqbuf, seqbuflen);
-                    }
-                }
-                break;
-
-                case 0x33:  // 3
-                case 0x34:  // 4
-                case 0x35:  // 5
-                case 0x37:  // 7
-                case 0x38:  // 8
                 {
                     seqbuflen = _get_control_character(seqbuf, key_event,
                         control_key_state);
@@ -3296,46 +3278,15 @@ static int _console_read(const HANDLE console, void* buf, size_t len) {
             // event.
             D("_console_read: unknown virtual key code: %d, enhanced: %s",
                 vk, _is_enhanced_key(control_key_state) ? "true" : "false");
-            key_event->wRepeatCount = 0;
             continue;
         }
 
-        int bytesRead = 0;
-
-        // put output wRepeatCount times into buf/len
-        while (key_event->wRepeatCount > 0) {
-            if (len >= outlen) {
-                // Write to buf/len
-                memcpy(buf, out, outlen);
-                buf = (void*)((char*)buf + outlen);
-                len -= outlen;
-                bytesRead += outlen;
-
-                // consume the input
-                --key_event->wRepeatCount;
-            } else {
-                // Not enough space, so just leave it in _win32_input_record
-                // for a subsequent retrieval.
-                if (bytesRead == 0) {
-                    // We didn't write anything because there wasn't enough
-                    // space to even write one sequence. This should never
-                    // happen if the caller uses sensible buffer sizes
-                    // (i.e. >= maximum sequence length which is probably a
-                    // few bytes long).
-                    D("_console_read: no buffer space to write one sequence; "
-                        "buffer: %ld, sequence: %ld\n", (long)len,
-                        (long)outlen);
-                    errno = ENOMEM;
-                    return -1;
-                } else {
-                    // Stop trying to write to buf/len, just return whatever
-                    // we wrote so far.
-                    break;
-                }
-            }
+        // put output wRepeatCount times into g_console_input_buffer
+        while (key_event->wRepeatCount-- > 0) {
+            g_console_input_buffer.insert(g_console_input_buffer.end(), out, out + outlen);
         }
 
-        return bytesRead;
+        // Loop around and try to flush g_console_input_buffer
     }
 }
 
@@ -3516,100 +3467,61 @@ static void _widen_fatal(const char *fmt, ...) {
     exit(-1);
 }
 
-// TODO: Consider implementing widen() and narrow() out of std::wstring_convert
-// once libcxx is supported on Windows. Or, consider libutils/Unicode.cpp.
-
-// Convert from UTF-8 to UTF-16. A size of -1 specifies a NULL terminated
-// string. Any other size specifies the number of chars to convert, excluding
-// any NULL terminator (if you're passing an explicit size, you probably don't
-// have a NULL terminated string in the first place).
-std::wstring widen(const char* utf8, const int size) {
-    // Note: Do not call SystemErrorCodeToString() from widen() because
-    // SystemErrorCodeToString() calls narrow() which may call fatal() which
-    // calls adb_vfprintf() which calls widen(), potentially causing infinite
-    // recursion.
-    const int chars_to_convert = MultiByteToWideChar(CP_UTF8, 0, utf8, size,
-                                                     NULL, 0);
-    if (chars_to_convert <= 0) {
-        // UTF-8 to UTF-16 should be lossless, so we don't expect this to fail.
-        _widen_fatal("MultiByteToWideChar failed counting: %d, "
-                     "GetLastError: %lu", chars_to_convert, GetLastError());
-    }
-
+// Convert size number of UTF-8 char's to UTF-16. Fatal exit on error.
+std::wstring widen(const char* utf8, const size_t size) {
     std::wstring utf16;
-    size_t chars_to_allocate = chars_to_convert;
-    if (size == -1) {
-        // chars_to_convert includes a NULL terminator, so subtract space
-        // for that because resize() includes that itself.
-        --chars_to_allocate;
+    if (!android::base::UTF8ToWide(utf8, size, &utf16)) {
+        // If we call fatal() here and fatal() calls widen(), then there may be
+        // infinite recursion. To avoid this, call _widen_fatal() instead.
+        _widen_fatal("cannot convert from UTF-8 to UTF-16");
     }
-    utf16.resize(chars_to_allocate);
-
-    // This uses &string[0] to get write-access to the entire string buffer
-    // which may be assuming that the chars are all contiguous, but it seems
-    // to work and saves us the hassle of using a temporary
-    // std::vector<wchar_t>.
-    const int result = MultiByteToWideChar(CP_UTF8, 0, utf8, size, &utf16[0],
-                                           chars_to_convert);
-    if (result != chars_to_convert) {
-        // UTF-8 to UTF-16 should be lossless, so we don't expect this to fail.
-        _widen_fatal("MultiByteToWideChar failed conversion: %d, "
-                     "GetLastError: %lu", result, GetLastError());
-    }
-
-    // If a size was passed in (size != -1), then the string is NULL terminated
-    // by a NULL char that was written by std::string::resize(). If size == -1,
-    // then MultiByteToWideChar() read a NULL terminator from the original
-    // string and converted it to a NULL UTF-16 char in the output.
 
     return utf16;
 }
 
-// Convert a NULL terminated string from UTF-8 to UTF-16.
+// Convert a NULL-terminated string of UTF-8 characters to UTF-16. Fatal exit
+// on error.
 std::wstring widen(const char* utf8) {
-    // Pass -1 to let widen() determine the string length.
-    return widen(utf8, -1);
-}
-
-// Convert from UTF-8 to UTF-16.
-std::wstring widen(const std::string& utf8) {
-    return widen(utf8.c_str(), utf8.length());
-}
-
-// Convert from UTF-16 to UTF-8.
-std::string narrow(const std::wstring& utf16) {
-    return narrow(utf16.c_str());
-}
-
-// Convert from UTF-16 to UTF-8.
-std::string narrow(const wchar_t* utf16) {
-    // Note: Do not call SystemErrorCodeToString() from narrow() because
-    // SystemErrorCodeToString() calls narrow() and we don't want potential
-    // infinite recursion.
-    const int chars_required = WideCharToMultiByte(CP_UTF8, 0, utf16, -1, NULL,
-                                                   0, NULL, NULL);
-    if (chars_required <= 0) {
-        // UTF-16 to UTF-8 should be lossless, so we don't expect this to fail.
-        fatal("WideCharToMultiByte failed counting: %d, GetLastError: %lu",
-              chars_required, GetLastError());
+    std::wstring utf16;
+    if (!android::base::UTF8ToWide(utf8, &utf16)) {
+        // If we call fatal() here and fatal() calls widen(), then there may be
+        // infinite recursion. To avoid this, call _widen_fatal() instead.
+        _widen_fatal("cannot convert from UTF-8 to UTF-16");
     }
 
-    std::string utf8;
-    // Subtract space for the NULL terminator because resize() includes
-    // that itself. Note that this could potentially throw a std::bad_alloc
-    // exception.
-    utf8.resize(chars_required - 1);
+    return utf16;
+}
 
-    // This uses &string[0] to get write-access to the entire string buffer
-    // which may be assuming that the chars are all contiguous, but it seems
-    // to work and saves us the hassle of using a temporary
-    // std::vector<char>.
-    const int result = WideCharToMultiByte(CP_UTF8, 0, utf16, -1, &utf8[0],
-                                           chars_required, NULL, NULL);
-    if (result != chars_required) {
-        // UTF-16 to UTF-8 should be lossless, so we don't expect this to fail.
-        fatal("WideCharToMultiByte failed conversion: %d, GetLastError: %lu",
-              result, GetLastError());
+// Convert a UTF-8 std::string (including any embedded NULL characters) to
+// UTF-16. Fatal exit on error.
+std::wstring widen(const std::string& utf8) {
+    std::wstring utf16;
+    if (!android::base::UTF8ToWide(utf8, &utf16)) {
+        // If we call fatal() here and fatal() calls widen(), then there may be
+        // infinite recursion. To avoid this, call _widen_fatal() instead.
+        _widen_fatal("cannot convert from UTF-8 to UTF-16");
+    }
+
+    return utf16;
+}
+
+// Convert a UTF-16 std::wstring (including any embedded NULL characters) to
+// UTF-8. Fatal exit on error.
+std::string narrow(const std::wstring& utf16) {
+    std::string utf8;
+    if (!android::base::WideToUTF8(utf16, &utf8)) {
+        fatal("cannot convert from UTF-16 to UTF-8");
+    }
+
+    return utf8;
+}
+
+// Convert a NULL-terminated string of UTF-16 characters to UTF-8. Fatal exit
+// on error.
+std::string narrow(const wchar_t* utf16) {
+    std::string utf8;
+    if (!android::base::WideToUTF8(utf16, &utf8)) {
+        fatal("cannot convert from UTF-16 to UTF-8");
     }
 
     return utf8;
@@ -3752,9 +3664,12 @@ int adb_chmod(const char* path, int mode) {
 // on error.
 static int _console_write_utf8(const char* buf, size_t size, FILE* stream,
                                HANDLE console) {
-    // Convert from UTF-8 to UTF-16.
+    std::wstring output;
+
+    // Try to convert from data that might be UTF-8 to UTF-16, ignoring errors.
+    // Data might not be UTF-8 if the user cat's random data, runs dmesg, etc.
     // This could throw std::bad_alloc.
-    const std::wstring output(widen(buf, size));
+    (void)android::base::UTF8ToWide(buf, size, &output);
 
     // Note that this does not do \n => \r\n translation because that
     // doesn't seem necessary for the Windows console. For the Windows
@@ -3936,7 +3851,7 @@ extern "C" int wmain(int argc, wchar_t **argv) {
 // currently updated if putenv, setenv, unsetenv are called. Note that no
 // thread synchronization is done, but we're called early enough in
 // single-threaded startup that things work ok.
-static std::unordered_map<std::string, char*> g_environ_utf8;
+static auto& g_environ_utf8 = *new std::unordered_map<std::string, char*>();
 
 // Make sure that shadow UTF-8 environment variables are setup.
 static void _ensure_env_setup() {
