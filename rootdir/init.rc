@@ -144,23 +144,27 @@ on init
     # sets up initial cpusets for ActivityManager
     mkdir /dev/cpuset
     mount cpuset none /dev/cpuset
-    mkdir /dev/cpuset/foreground
-    mkdir /dev/cpuset/foreground/boost
-    mkdir /dev/cpuset/background
-    # system-background is for system tasks that should only run on
-    # little cores, not on bigs
-    # to be used only by init, so don't change the permissions
-    mkdir /dev/cpuset/system-background
+
     # this ensures that the cpusets are present and usable, but the device's
     # init.rc must actually set the correct cpus
+    mkdir /dev/cpuset/foreground
     write /dev/cpuset/foreground/cpus 0
-    write /dev/cpuset/foreground/boost/cpus 0
-    write /dev/cpuset/background/cpus 0
-    write /dev/cpuset/system-background/cpus 0
     write /dev/cpuset/foreground/mems 0
+    mkdir /dev/cpuset/foreground/boost
+    write /dev/cpuset/foreground/boost/cpus 0
     write /dev/cpuset/foreground/boost/mems 0
+    mkdir /dev/cpuset/background
+    write /dev/cpuset/background/cpus 0
     write /dev/cpuset/background/mems 0
+
+    # system-background is for system tasks that should only run on
+    # little cores, not on bigs
+    # to be used only by init, so don't change system-bg permissions
+    mkdir /dev/cpuset/system-background
+    write /dev/cpuset/system-background/cpus 0
     write /dev/cpuset/system-background/mems 0
+
+    # change permissions for all cpusets we'll touch at runtime
     chown system system /dev/cpuset
     chown system system /dev/cpuset/foreground
     chown system system /dev/cpuset/foreground/boost
@@ -249,6 +253,9 @@ on post-fs
     mount rootfs rootfs / shared rec
     # Mount default storage into root namespace
     mount none /mnt/runtime/default /storage slave bind rec
+
+    # Make sure /sys/kernel/debug (if present) is labeled properly
+    restorecon_recursive /sys/kernel/debug
 
     # We chown/chmod /cache again so because mount is run as root + defaults
     chown system cache /cache
@@ -501,6 +508,8 @@ on boot
     class_start core
 
 on nonencrypted
+    # A/B update verifier that marks a successful boot.
+    exec - root -- /system/bin/update_verifier nonencrypted
     class_start main
     class_start late_start
 
@@ -529,9 +538,13 @@ on property:vold.decrypt=trigger_post_fs_data
     trigger post-fs-data
 
 on property:vold.decrypt=trigger_restart_min_framework
+    # A/B update verifier that marks a successful boot.
+    exec - root -- /system/bin/update_verifier trigger_restart_min_framework
     class_start main
 
 on property:vold.decrypt=trigger_restart_framework
+    # A/B update verifier that marks a successful boot.
+    exec - root -- /system/bin/update_verifier trigger_restart_framework
     class_start main
     class_start late_start
 

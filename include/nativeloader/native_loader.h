@@ -14,12 +14,18 @@
  * limitations under the License.
  */
 
-#include <gtest/gtest.h>
+#ifndef NATIVE_LOADER_H_
+#define NATIVE_LOADER_H_
 
-#include "android-base/logging.h"
+#include "jni.h"
+#include <stdint.h>
 
-int main(int argc, char** argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  android::base::InitLogging(argv, android::base::StderrLogger);
-  return RUN_ALL_TESTS();
-}
+namespace android {
+
+__attribute__((visibility("default")))
+void* OpenNativeLibrary(JNIEnv* env, int32_t target_sdk_version, const char* path,
+                        jobject class_loader, jstring library_path, jstring permitted_path);
+
+};  // namespace android
+
+#endif  // NATIVE_BRIDGE_H_

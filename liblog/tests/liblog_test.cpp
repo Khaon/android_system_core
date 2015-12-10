@@ -164,6 +164,43 @@ TEST(liblog, __android_log_btwrite__android_logger_list_read) {
     android_logger_list_close(logger_list);
 }
 
+TEST(liblog, __security) {
+    static const char persist_key[] = "persist.logd.security";
+    static const char readonly_key[] = "ro.device_owner";
+    static const char nothing_val[] = "_NOTHING_TO_SEE_HERE_";
+    char persist[PROP_VALUE_MAX];
+    char readonly[PROP_VALUE_MAX];
+
+    property_get(persist_key, persist, "");
+    property_get(readonly_key, readonly, nothing_val);
+
+    if (!strcmp(readonly, nothing_val)) {
+        EXPECT_FALSE(__android_log_security());
+        fprintf(stderr, "Warning, setting ro.device_owner to a domain\n");
+        property_set(readonly_key, "com.google.android.SecOps.DeviceOwner");
+    } else if (!strcasecmp(readonly, "false") || !readonly[0]) {
+        EXPECT_FALSE(__android_log_security());
+        return;
+    }
+
+    if (!strcasecmp(persist, "true")) {
+        EXPECT_TRUE(__android_log_security());
+    } else {
+        EXPECT_FALSE(__android_log_security());
+    }
+    property_set(persist_key, "TRUE");
+    EXPECT_TRUE(__android_log_security());
+    property_set(persist_key, "FALSE");
+    EXPECT_FALSE(__android_log_security());
+    property_set(persist_key, "true");
+    EXPECT_TRUE(__android_log_security());
+    property_set(persist_key, "false");
+    EXPECT_FALSE(__android_log_security());
+    property_set(persist_key, "");
+    EXPECT_FALSE(__android_log_security());
+    property_set(persist_key, persist);
+}
+
 static unsigned signaled;
 log_time signal_time;
 
@@ -611,11 +648,11 @@ TEST(liblog, android_logger_get_) {
         struct logger * logger;
         EXPECT_TRUE(NULL != (logger = android_logger_open(logger_list, id)));
         EXPECT_EQ(id, android_logger_get_id(logger));
+        EXPECT_LT(0, android_logger_get_log_size(logger));
         /* crash buffer is allowed to be empty, that is actually healthy! */
-        if (android_logger_get_log_size(logger) || strcmp("crash", name)) {
-            EXPECT_LT(0, android_logger_get_log_size(logger));
+        if (android_logger_get_log_readable_size(logger) || strcmp("crash", name)) {
+            EXPECT_LT(0, android_logger_get_log_readable_size(logger));
         }
-        EXPECT_LT(0, android_logger_get_log_readable_size(logger));
         EXPECT_LT(0, android_logger_get_log_version(logger));
     }
 

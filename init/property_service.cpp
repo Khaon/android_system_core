@@ -47,7 +47,7 @@
 #include <selinux/label.h>
 
 #include <fs_mgr.h>
-#include <base/file.h>
+#include <android-base/file.h>
 #include "bootimg.h"
 
 #include "property_service.h"
@@ -60,34 +60,13 @@
 #define RECOVERY_MOUNT_POINT "/recovery"
 
 static int persistent_properties_loaded = 0;
-static bool property_area_initialized = false;
 
 static int property_set_fd = -1;
 
-struct workspace {
-    size_t size;
-    int fd;
-};
-
-static workspace pa_workspace;
-
 void property_init() {
-    if (property_area_initialized) {
-        return;
-    }
-
-    property_area_initialized = true;
-
     if (__system_property_area_init()) {
         ERROR("Failed to initialize property area\n");
         exit(1);
-    }
-
-    pa_workspace.size = 0;
-    pa_workspace.fd = open(PROP_FILENAME, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (pa_workspace.fd == -1) {
-        ERROR("Failed to open %s: %s\n", PROP_FILENAME, strerror(errno));
-        return;
     }
 }
 
@@ -354,12 +333,6 @@ static void handle_property_set_fd()
     }
 }
 
-void get_property_workspace(int *fd, int *sz)
-{
-    *fd = pa_workspace.fd;
-    *sz = pa_workspace.size;
-}
-
 static void load_properties_from_file(const char *, const char *);
 
 /*
@@ -496,10 +469,6 @@ static void load_persistent_properties() {
 
 void property_load_boot_defaults() {
     load_properties_from_file(PROP_PATH_RAMDISK_DEFAULT, NULL);
-}
-
-bool properties_initialized() {
-    return property_area_initialized;
 }
 
 static void load_override_properties() {

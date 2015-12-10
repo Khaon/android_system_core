@@ -24,8 +24,8 @@
 
 #include <selinux/selinux.h>
 
-#include <base/file.h>
-#include <base/stringprintf.h>
+#include <android-base/file.h>
+#include <android-base/stringprintf.h>
 #include <cutils/android_reboot.h>
 #include <cutils/sockets.h>
 
@@ -76,11 +76,6 @@ Service::Service(const std::string& name, const std::string& classname,
 }
 
 void Service::NotifyStateChange(const std::string& new_state) const {
-    if (!properties_initialized()) {
-        // If properties aren't available yet, we can't set them.
-        return;
-    }
-
     if ((flags_ & SVC_EXEC) != 0) {
         // 'exec' commands don't have properties tracking their state.
         return;
@@ -400,14 +395,7 @@ bool Service::Start(const std::vector<std::string>& dynamic_args) {
 
     pid_t pid = fork();
     if (pid == 0) {
-        int fd, sz;
-
         umask(077);
-        if (properties_initialized()) {
-            get_property_workspace(&fd, &sz);
-            std::string tmp = StringPrintf("%d,%d", dup(fd), sz);
-            add_environment("ANDROID_PROPERTY_WORKSPACE", tmp.c_str());
-        }
 
         for (const auto& ei : envvars_) {
             add_environment(ei.name.c_str(), ei.value.c_str());

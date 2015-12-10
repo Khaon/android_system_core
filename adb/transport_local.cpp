@@ -25,7 +25,7 @@
 #include <string.h>
 #include <sys/types.h>
 
-#include <base/stringprintf.h>
+#include <android-base/stringprintf.h>
 #include <cutils/sockets.h>
 
 #if !ADB_HOST
@@ -143,7 +143,8 @@ static void *client_socket_thread(void *x)
 static void *server_socket_thread(void * arg)
 {
     int serverfd, fd;
-    struct sockaddr addr;
+    sockaddr_storage ss;
+    sockaddr *addrp = reinterpret_cast<sockaddr*>(&ss);
     socklen_t alen;
     int port = (int) (uintptr_t) arg;
 
@@ -162,9 +163,9 @@ static void *server_socket_thread(void * arg)
             close_on_exec(serverfd);
         }
 
-        alen = sizeof(addr);
+        alen = sizeof(ss);
         D("server: trying to get new connection from %d", port);
-        fd = adb_socket_accept(serverfd, &addr, &alen);
+        fd = adb_socket_accept(serverfd, addrp, &alen);
         if(fd >= 0) {
             D("server: new connection on fd %d", fd);
             close_on_exec(fd);

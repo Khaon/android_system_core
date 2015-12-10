@@ -11,6 +11,10 @@
 #define _LIBS_LOG_LOGGER_H
 
 #include <stdint.h>
+#ifdef __linux__
+#include <time.h> /* clockid_t definition */
+#endif
+
 #include <log/log.h>
 #include <log/log_read.h>
 
@@ -159,6 +163,8 @@ int android_logger_set_prune_list(struct logger_list *logger_list,
 #define ANDROID_LOG_RDWR     O_RDWR
 #define ANDROID_LOG_ACCMODE  O_ACCMODE
 #define ANDROID_LOG_NONBLOCK O_NONBLOCK
+#define ANDROID_LOG_WRAP     0x40000000 /* Block until buffer about to wrap */
+#define ANDROID_LOG_WRAP_DEFAULT_TIMEOUT 7200 /* 2 hour default */
 #define ANDROID_LOG_PSTORE   0x80000000
 
 struct logger_list *android_logger_list_alloc(int mode,
@@ -183,7 +189,9 @@ struct logger_list *android_logger_list_open(log_id_t id,
                                              pid_t pid);
 #define android_logger_list_close android_logger_list_free
 
-char android_log_timestamp();
+#ifdef __linux__
+clockid_t android_log_clockid();
+#endif
 
 /*
  * log_id_t helpers

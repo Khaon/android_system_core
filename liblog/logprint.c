@@ -203,7 +203,7 @@ AndroidLogFormat *android_log_format_new()
     p_ret->year_output = false;
     p_ret->zone_output = false;
     p_ret->epoch_output = false;
-    p_ret->monotonic_output = android_log_timestamp() == 'm';
+    p_ret->monotonic_output = android_log_clockid() == CLOCK_MONOTONIC;
 
     return p_ret;
 }
@@ -500,14 +500,14 @@ int android_log_processLogBuffer(struct logger_entry *buf,
     }
     if (msgEnd == -1) {
         /* incoming message not null-terminated; force it */
-        msgEnd = buf->len - 1;
+        msgEnd = buf->len - 1; /* may result in msgEnd < msgStart */
         msg[msgEnd] = '\0';
     }
 
     entry->priority = msg[0];
     entry->tag = msg + 1;
     entry->message = msg + msgStart;
-    entry->messageLen = msgEnd - msgStart;
+    entry->messageLen = (msgEnd < msgStart) ? 0 : (msgEnd - msgStart);
 
     return 0;
 }
@@ -1262,7 +1262,7 @@ char *android_log_formatLogLine (
     nsec = entry->tv_nsec;
     if (p_format->monotonic_output) {
         // prevent convertMonotonic from being called if logd is monotonic
-        if (android_log_timestamp() != 'm') {
+        if (android_log_clockid() != CLOCK_MONOTONIC) {
             struct timespec time;
             convertMonotonic(&time, entry);
             now = time.tv_sec;

@@ -40,9 +40,9 @@
 #include <selinux/label.h>
 #include <selinux/android.h>
 
-#include <base/file.h>
-#include <base/stringprintf.h>
-#include <base/strings.h>
+#include <android-base/file.h>
+#include <android-base/stringprintf.h>
+#include <android-base/strings.h>
 #include <cutils/android_reboot.h>
 #include <cutils/fs.h>
 #include <cutils/iosched_policy.h>
@@ -350,6 +350,18 @@ static void import_kernel_nv(const std::string& key, const std::string& value, b
     }
 }
 
+static void export_oem_lock_status() {
+    if (property_get("ro.oem_unlock_supported") != "1") {
+        return;
+    }
+
+    std::string value = property_get("ro.boot.verifiedbootstate");
+
+    if (!value.empty()) {
+        property_set("ro.boot.flash.locked", value == "orange" ? "0" : "1");
+    }
+}
+
 static void export_kernel_boot_props() {
     struct {
         const char *src_prop;
@@ -601,6 +613,7 @@ int main(int argc, char** argv) {
     signal_handler_init();
 
     property_load_boot_defaults();
+    export_oem_lock_status();
     start_property_service();
 
     const BuiltinFunctionMap function_map;
