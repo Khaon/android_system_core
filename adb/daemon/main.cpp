@@ -25,15 +25,20 @@
 #include <getopt.h>
 #include <sys/prctl.h>
 
+#include <memory>
+
 #include <android-base/logging.h>
 #include <android-base/stringprintf.h>
+#include <libminijail.h>
+
 #include "cutils/properties.h"
 #include "private/android_filesystem_config.h"
-#include "selinux/selinux.h"
+#include "selinux/android.h"
 
 #include "adb.h"
 #include "adb_auth.h"
 #include "adb_listeners.h"
+#include "adb_utils.h"
 #include "transport.h"
 
 static const char* root_seclabel = nullptr;
@@ -52,12 +57,7 @@ static void drop_capabilities_bounding_set_if_needed() {
             continue;
         }
 
-        int err = prctl(PR_CAPBSET_DROP, i, 0, 0, 0);
-
-        // Some kernels don't have file capabilities compiled in, and
-        // prctl(PR_CAPBSET_DROP) returns EINVAL. Don't automatically
-        // die when we see such misconfigured kernels.
-        if ((err < 0) && (errno != EINVAL)) {
+        if (prctl(PR_CAPBSET_DROP, i, 0, 0, 0) == -1) {
             PLOG(FATAL) << "Could not drop capabilities";
         }
     }
@@ -90,12 +90,12 @@ static bool should_drop_privileges() {
     bool adb_root = (strcmp(value, "1") == 0);
     bool adb_unroot = (strcmp(value, "0") == 0);
 
-    // ...except "adb root" lets you keep privileges in a debuggable build.
+    // ... except "adb root" lets you keep privileges in a debuggable build.
     if (ro_debuggable && adb_root) {
         drop = false;
     }
 
-    // ...and "adb unroot" lets you explicitly drop privileges.
+    // ... and "adb unroot" lets you explicitly drop privileges.
     if (adb_unroot) {
         drop = true;
     }
@@ -104,6 +104,62 @@ static bool should_drop_privileges() {
 #else
     return true; // "adb root" not allowed, always drop privileges.
 #endif // ALLOW_ADBD_ROOT
+}
+
+static void drop_privileges(int server_port) {
+    std::unique_ptr<minijail, void (*)(minijail*)> jail(minijail_new(),
+                                                        &minijail_destroy);
+
+    // Add extra groups:
+    // AID_ADB to access the USB driver
+    // AID_LOG to read system logs (adb logcat)
+    // AID_INPUT to diagnose input issues (getevent)
+    // AID_INET to diagnose network issues (ping)
+    // AID_NET_BT and AID_NET_BT_ADMIN to diagnose bluetooth (hcidump)
+    // AID_SDCARD_R to allow reading from the SD card
+    // AID_SDCARD_RW to allow writing to the SD card
+    // AID_NET_BW_STATS to read out qtaguid statistics
+    // AID_READPROC for reading /proc entries across UID boundaries
+    gid_t groups[] = {AID_ADB,      AID_LOG,       AID_INPUT,
+                      AID_INET,     AID_NET_BT,    AID_NET_BT_ADMIN,
+                      AID_SDCARD_R, AID_SDCARD_RW, AID_NET_BW_STATS,
+                      AID_READPROC};
+    if (minijail_set_supplementary_gids(
+            jail.get(),
+            sizeof(groups) / sizeof(groups[0]),
+            groups) != 0) {
+        LOG(FATAL) << "Could not configure supplementary groups";
+    }
+
+    // Don't listen on a port (default 5037) if running in secure mode.
+    // Don't run as root if running in secure mode.
+    if (should_drop_privileges()) {
+        drop_capabilities_bounding_set_if_needed();
+
+        minijail_change_gid(jail.get(), AID_SHELL);
+        minijail_change_uid(jail.get(), AID_SHELL);
+        // minijail_enter() will abort if any priv-dropping step fails.
+        minijail_enter(jail.get());
+
+        D("Local port disabled");
+    } else {
+        // minijail_enter() will abort if any priv-dropping step fails.
+        minijail_enter(jail.get());
+
+        if (root_seclabel != nullptr) {
+            if (selinux_android_setcon(root_seclabel) < 0) {
+                LOG(FATAL) << "Could not set SELinux context";
+            }
+        }
+        std::string error;
+        std::string local_name =
+            android::base::StringPrintf("tcp:%d", server_port);
+        if (install_listener(local_name, "*smartsocket*", nullptr, 0,
+                             &error)) {
+            LOG(FATAL) << "Could not install *smartsocket* listener: "
+                       << error;
+        }
+    }
 }
 
 int adbd_main(int server_port) {
@@ -133,53 +189,7 @@ int adbd_main(int server_port) {
           " unchanged.\n");
     }
 
-    // Add extra groups:
-    // AID_ADB to access the USB driver
-    // AID_LOG to read system logs (adb logcat)
-    // AID_INPUT to diagnose input issues (getevent)
-    // AID_INET to diagnose network issues (ping)
-    // AID_NET_BT and AID_NET_BT_ADMIN to diagnose bluetooth (hcidump)
-    // AID_SDCARD_R to allow reading from the SD card
-    // AID_SDCARD_RW to allow writing to the SD card
-    // AID_NET_BW_STATS to read out qtaguid statistics
-    // AID_READPROC for reading /proc entries across UID boundaries
-    gid_t groups[] = {AID_ADB,      AID_LOG,       AID_INPUT,
-                      AID_INET,     AID_NET_BT,    AID_NET_BT_ADMIN,
-                      AID_SDCARD_R, AID_SDCARD_RW, AID_NET_BW_STATS,
-                      AID_READPROC };
-    if (setgroups(sizeof(groups) / sizeof(groups[0]), groups) != 0) {
-        PLOG(FATAL) << "Could not set supplemental groups";
-    }
-
-    /* don't listen on a port (default 5037) if running in secure mode */
-    /* don't run as root if we are running in secure mode */
-    if (should_drop_privileges()) {
-        drop_capabilities_bounding_set_if_needed();
-
-        /* then switch user and group to "shell" */
-        if (setgid(AID_SHELL) != 0) {
-            PLOG(FATAL) << "Could not setgid";
-        }
-        if (setuid(AID_SHELL) != 0) {
-            PLOG(FATAL) << "Could not setuid";
-        }
-
-        D("Local port disabled");
-    } else {
-        if (root_seclabel != nullptr) {
-            if (setcon(root_seclabel) < 0) {
-                LOG(FATAL) << "Could not set SELinux context";
-            }
-        }
-        std::string error;
-        std::string local_name =
-            android::base::StringPrintf("tcp:%d", server_port);
-        if (install_listener(local_name, "*smartsocket*", nullptr, 0,
-                             &error)) {
-            LOG(FATAL) << "Could not install *smartsocket* listener: "
-                << error;
-        }
-    }
+    drop_privileges(server_port);
 
     bool is_usb = false;
     if (access(USB_ADB_PATH, F_OK) == 0 || access(USB_FFS_ADB_EP0, F_OK) == 0) {
@@ -215,16 +225,6 @@ int adbd_main(int server_port) {
     fdevent_loop();
 
     return 0;
-}
-
-static void close_stdin() {
-    int fd = unix_open("/dev/null", O_RDONLY);
-    if (fd == -1) {
-        perror("failed to open /dev/null, stdin will remain open");
-        return;
-    }
-    dup2(fd, STDIN_FILENO);
-    unix_close(fd);
 }
 
 int main(int argc, char** argv) {

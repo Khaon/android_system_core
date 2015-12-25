@@ -254,7 +254,7 @@ static bool format_verity_table(char *buf, const size_t bufsize,
         res = snprintf(buf, bufsize, "%s 2 " VERITY_TABLE_OPT_IGNZERO " %s", params->table,
                     mode_flag);
     } else {
-        res = strlcpy(buf, params->table, bufsize);
+        res = snprintf(buf, bufsize, "%s 1 " VERITY_TABLE_OPT_IGNZERO, params->table);
     }
 
     if (res < 0 || (size_t)res >= bufsize) {
@@ -695,31 +695,27 @@ static int load_verity_state(struct fstab_rec *fstab, int *mode)
     int match = 0;
     off64_t offset = 0;
 
+    /* unless otherwise specified, use EIO mode */
+    *mode = VERITY_MODE_EIO;
+
     /* use the kernel parameter if set */
     property_get("ro.boot.veritymode", propbuf, "");
 
     if (*propbuf != '\0') {
         if (!strcmp(propbuf, "enforcing")) {
             *mode = VERITY_MODE_DEFAULT;
-            return 0;
-        } else if (!strcmp(propbuf, "logging")) {
-            *mode = VERITY_MODE_LOGGING;
-            return 0;
-        } else {
-            INFO("Unknown value %s for veritymode; ignoring", propbuf);
         }
+        return 0;
     }
 
     if (get_verity_state_offset(fstab, &offset) < 0) {
         /* fall back to stateless behavior */
-        *mode = VERITY_MODE_EIO;
         return 0;
     }
 
     if (was_verity_restart()) {
         /* device was restarted after dm-verity detected a corrupted
-         * block, so switch to logging mode */
-        *mode = VERITY_MODE_LOGGING;
+         * block, so use EIO mode */
         return write_verity_state(fstab->verity_loc, offset, *mode);
     }
 
@@ -784,7 +780,6 @@ out:
 int fs_mgr_update_verity_state(fs_mgr_verity_state_callback callback)
 {
     alignas(dm_ioctl) char buffer[DM_BUF_SIZE];
-    bool use_state = true;
     char fstab_filename[PROPERTY_VALUE_MAX + sizeof(FSTAB_PREFIX)];
     char *mount_point;
     char propbuf[PROPERTY_VALUE_MAX];
@@ -793,15 +788,11 @@ int fs_mgr_update_verity_state(fs_mgr_verity_state_callback callback)
     int i;
     int mode;
     int rc = -1;
-    off64_t offset = 0;
     struct dm_ioctl *io = (struct dm_ioctl *) buffer;
     struct fstab *fstab = NULL;
 
-    /* check if we need to store the state */
-    property_get("ro.boot.veritymode", propbuf, "");
-
-    if (*propbuf != '\0') {
-        use_state = false; /* state is kept by the bootloader */
+    if (!callback) {
+        return -1;
     }
 
     if (fs_mgr_load_verity_state(&mode) == -1) {
@@ -841,16 +832,7 @@ int fs_mgr_update_verity_state(fs_mgr_verity_state_callback callback)
 
         status = &buffer[io->data_start + sizeof(struct dm_target_spec)];
 
-        if (use_state && *status == 'C') {
-            if (write_verity_state(fstab->recs[i].verity_loc, offset,
-                    VERITY_MODE_LOGGING) < 0) {
-                continue;
-            }
-        }
-
-        if (callback) {
-            callback(&fstab->recs[i], mount_point, mode, *status);
-        }
+        callback(&fstab->recs[i], mount_point, mode, *status);
     }
 
     rc = 0;
@@ -962,12 +944,42 @@ int fs_mgr_setup_verity(struct fstab_rec *fstab)
 
     // load the verity mapping table
     if (load_verity_table(io, mount_point, verity.data_size, fd, &params,
-            format_verity_table) < 0 &&
-        // try the legacy format for backwards compatibility
-        load_verity_table(io, mount_point, verity.data_size, fd, &params,
-            format_legacy_verity_table) < 0) {
-        goto out;
+            format_verity_table) == 0) {
+        goto loaded;
     }
+
+    if (params.ecc.valid) {
+        // kernel may not support error correction, try without
+        INFO("Disabling error correction for %s\n", mount_point);
+        params.ecc.valid = false;
+
+        if (load_verity_table(io, mount_point, verity.data_size, fd, &params,
+                format_verity_table) == 0) {
+            goto loaded;
+        }
+    }
+
+    // try the legacy format for backwards compatibility
+    if (load_verity_table(io, mount_point, verity.data_size, fd, &params,
+            format_legacy_verity_table) == 0) {
+        goto loaded;
+    }
+
+    if (params.mode != VERITY_MODE_EIO) {
+        // as a last resort, EIO mode should always be supported
+        INFO("Falling back to EIO mode for %s\n", mount_point);
+        params.mode = VERITY_MODE_EIO;
+
+        if (load_verity_table(io, mount_point, verity.data_size, fd, &params,
+                format_legacy_verity_table) == 0) {
+            goto loaded;
+        }
+    }
+
+    ERROR("Failed to load verity table for %s\n", mount_point);
+    goto out;
+
+loaded:
 
     // activate the device
     if (resume_verity_table(io, mount_point, fd) < 0) {

@@ -100,6 +100,12 @@ void LogBuffer::init() {
     unsigned long default_size = property_get_size(global_tuneable);
     if (!default_size) {
         default_size = property_get_size(global_default);
+        if (!default_size) {
+            default_size = property_get_bool("ro.config.low_ram",
+                                             BOOL_DEFAULT_FALSE)
+                ? LOG_BUFFER_MIN_SIZE // 64K
+                : LOG_BUFFER_SIZE;    // 256K
+        }
     }
 
     log_id_for_each(i) {
@@ -199,22 +205,24 @@ int LogBuffer::log(log_id_t log_id, log_time realtime,
 
     LogBufferElement *elem = new LogBufferElement(log_id, realtime,
                                                   uid, pid, tid, msg, len);
-    int prio = ANDROID_LOG_INFO;
-    const char *tag = NULL;
-    if (log_id == LOG_ID_EVENTS) {
-        tag = android::tagToName(elem->getTag());
-    } else {
-        prio = *msg;
-        tag = msg + 1;
-    }
-    if (!__android_log_is_loggable(prio, tag, ANDROID_LOG_VERBOSE)) {
-        // Log traffic received to total
-        pthread_mutex_lock(&mLogElementsLock);
-        stats.add(elem);
-        stats.subtract(elem);
-        pthread_mutex_unlock(&mLogElementsLock);
-        delete elem;
-        return -EACCES;
+    if (log_id != LOG_ID_SECURITY) {
+        int prio = ANDROID_LOG_INFO;
+        const char *tag = NULL;
+        if (log_id == LOG_ID_EVENTS) {
+            tag = android::tagToName(elem->getTag());
+        } else {
+            prio = *msg;
+            tag = msg + 1;
+        }
+        if (!__android_log_is_loggable(prio, tag, ANDROID_LOG_VERBOSE)) {
+            // Log traffic received to total
+            pthread_mutex_lock(&mLogElementsLock);
+            stats.add(elem);
+            stats.subtract(elem);
+            pthread_mutex_unlock(&mLogElementsLock);
+            delete elem;
+            return -EACCES;
+        }
     }
 
     pthread_mutex_lock(&mLogElementsLock);
@@ -484,7 +492,7 @@ bool LogBuffer::prune(log_id_t id, unsigned long pruneRows, uid_t caller_uid) {
     }
 
     // prune by worst offender by uid
-    bool hasBlacklist = mPrune.naughty();
+    bool hasBlacklist = (id != LOG_ID_SECURITY) && mPrune.naughty();
     while (!clearAll && (pruneRows > 0)) {
         // recalculate the worst offender on every batched pass
         uid_t worst = (uid_t) -1;
@@ -492,7 +500,8 @@ bool LogBuffer::prune(log_id_t id, unsigned long pruneRows, uid_t caller_uid) {
         size_t second_worst_sizes = 0;
 
         if (worstUidEnabledForLogid(id) && mPrune.worstUidEnabled()) {
-            std::unique_ptr<const UidEntry *[]> sorted = stats.sort(2, id);
+            std::unique_ptr<const UidEntry *[]> sorted = stats.sort(
+                AID_ROOT, (pid_t)0, 2, id);
 
             if (sorted.get()) {
                 if (sorted[0] && sorted[1]) {
@@ -654,7 +663,7 @@ bool LogBuffer::prune(log_id_t id, unsigned long pruneRows, uid_t caller_uid) {
     }
 
     bool whitelist = false;
-    bool hasWhitelist = mPrune.nice() && !clearAll;
+    bool hasWhitelist = (id != LOG_ID_SECURITY) && mPrune.nice() && !clearAll;
     it = mLogElements.begin();
     while((pruneRows > 0) && (it != mLogElements.end())) {
         LogBufferElement *e = *it;
@@ -846,7 +855,7 @@ uint64_t LogBuffer::flushTo(
         pthread_mutex_unlock(&mLogElementsLock);
 
         // range locking in LastLogTimes looks after us
-        max = element->flushTo(reader, this);
+        max = element->flushTo(reader, this, privileged);
 
         if (max == element->FLUSH_ERROR) {
             return max;
@@ -859,10 +868,11 @@ uint64_t LogBuffer::flushTo(
     return max;
 }
 
-std::string LogBuffer::formatStatistics(uid_t uid, unsigned int logMask) {
+std::string LogBuffer::formatStatistics(uid_t uid, pid_t pid,
+                                        unsigned int logMask) {
     pthread_mutex_lock(&mLogElementsLock);
 
-    std::string ret = stats.format(uid, logMask);
+    std::string ret = stats.format(uid, pid, logMask);
 
     pthread_mutex_unlock(&mLogElementsLock);
 

@@ -19,6 +19,8 @@
 #include <sysexits.h>
 #include <time.h>
 
+#include <memory>
+
 #include <base/bind.h>
 #include <base/files/file_path.h>
 #include <base/files/file_util.h>
@@ -33,6 +35,7 @@
 #include <dbus/message.h>
 
 #include "constants.h"
+#include "metrics_collector_service_trampoline.h"
 
 using base::FilePath;
 using base::StringPrintf;
@@ -45,11 +48,6 @@ using std::string;
 using std::vector;
 
 namespace {
-
-const char kCrashReporterInterface[] = "org.chromium.CrashReporter";
-const char kCrashReporterUserCrashSignal[] = "UserCrash";
-const char kCrashReporterMatchRule[] =
-    "type='signal',interface='%s',path='/',member='%s'";
 
 const int kSecondsPerMinute = 60;
 const int kMinutesPerHour = 60;
@@ -129,6 +127,10 @@ int MetricsCollector::Run() {
     version_cumulative_active_use_->Set(0);
     version_cumulative_cpu_use_->Set(0);
   }
+
+  // Start metricscollectorservice via trampoline
+  MetricsCollectorServiceTrampoline metricscollectorservice_trampoline(this);
+  metricscollectorservice_trampoline.Run();
 
   return brillo::DBusDaemon::Run();
 }
@@ -223,39 +225,17 @@ int MetricsCollector::OnInit() {
   bus_->AssertOnDBusThread();
   CHECK(bus_->SetUpAsyncOperations());
 
-  if (bus_->is_connected()) {
-    const std::string match_rule =
-        base::StringPrintf(kCrashReporterMatchRule,
-                           kCrashReporterInterface,
-                           kCrashReporterUserCrashSignal);
-
-    bus_->AddFilterFunction(&MetricsCollector::MessageFilter, this);
-
-    DBusError error;
-    dbus_error_init(&error);
-    bus_->AddMatch(match_rule, &error);
-
-    if (dbus_error_is_set(&error)) {
-      LOG(ERROR) << "Failed to add match rule \"" << match_rule << "\". Got "
-          << error.name << ": " << error.message;
-      return EX_SOFTWARE;
-    }
-  } else {
-    LOG(ERROR) << "DBus isn't connected.";
-    return EX_UNAVAILABLE;
-  }
-
   device_ = weaved::Device::CreateInstance(
       bus_,
       base::Bind(&MetricsCollector::UpdateWeaveState, base::Unretained(this)));
   device_->AddComponent(kWeaveComponent, {"_metrics"});
   device_->AddCommandHandler(
       kWeaveComponent,
-      "_metrics._enableAnalyticsReporting",
+      "_metrics.enableAnalyticsReporting",
       base::Bind(&MetricsCollector::OnEnableMetrics, base::Unretained(this)));
   device_->AddCommandHandler(
       kWeaveComponent,
-      "_metrics._disableAnalyticsReporting",
+      "_metrics.disableAnalyticsReporting",
       base::Bind(&MetricsCollector::OnDisableMetrics, base::Unretained(this)));
 
   latest_cpu_use_microseconds_ = cpu_usage_collector_->GetCumulativeCpuUse();
@@ -268,23 +248,6 @@ int MetricsCollector::OnInit() {
 }
 
 void MetricsCollector::OnShutdown(int* return_code) {
-  if (!testing_ && bus_->is_connected()) {
-    const std::string match_rule =
-        base::StringPrintf(kCrashReporterMatchRule,
-                           kCrashReporterInterface,
-                           kCrashReporterUserCrashSignal);
-
-    bus_->RemoveFilterFunction(&MetricsCollector::MessageFilter, this);
-
-    DBusError error;
-    dbus_error_init(&error);
-    bus_->RemoveMatch(match_rule, &error);
-
-    if (dbus_error_is_set(&error)) {
-      LOG(ERROR) << "Failed to remove match rule \"" << match_rule << "\". Got "
-          << error.name << ": " << error.message;
-    }
-  }
   brillo::DBusDaemon::OnShutdown(return_code);
 }
 
@@ -333,41 +296,11 @@ void MetricsCollector::UpdateWeaveState() {
       metrics_lib_->AreMetricsEnabled() ? "enabled" : "disabled";
 
   if (!device_->SetStateProperty(kWeaveComponent,
-                                 "_metrics._AnalyticsReportingState",
+                                 "_metrics.analyticsReportingState",
                                  enabled,
                                  nullptr)) {
     LOG(ERROR) << "failed to update weave's state";
   }
-}
-
-// static
-DBusHandlerResult MetricsCollector::MessageFilter(DBusConnection* connection,
-                                                   DBusMessage* message,
-                                                   void* user_data) {
-  int message_type = dbus_message_get_type(message);
-  if (message_type != DBUS_MESSAGE_TYPE_SIGNAL) {
-    DLOG(WARNING) << "unexpected message type " << message_type;
-    return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
-  }
-
-  // Signal messages always have interfaces.
-  const std::string interface(dbus_message_get_interface(message));
-  const std::string member(dbus_message_get_member(message));
-  DLOG(INFO) << "Got " << interface << "." << member << " D-Bus signal";
-
-  MetricsCollector* daemon = static_cast<MetricsCollector*>(user_data);
-
-  DBusMessageIter iter;
-  dbus_message_iter_init(message, &iter);
-  if (interface == kCrashReporterInterface) {
-    CHECK_EQ(member, kCrashReporterUserCrashSignal);
-    daemon->ProcessUserCrash();
-  } else {
-    // Ignore messages from the bus itself.
-    return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
-  }
-
-  return DBUS_HANDLER_RESULT_HANDLED;
 }
 
 void MetricsCollector::ProcessUserCrash() {
@@ -734,7 +667,7 @@ void MetricsCollector::SendKernelCrashesCumulativeCountStats() {
 }
 
 void MetricsCollector::SendAndResetDailyUseSample(
-    const scoped_ptr<PersistentInteger>& use) {
+    const unique_ptr<PersistentInteger>& use) {
   SendSample(use->Name(),
              use->GetAndClear(),
              1,                        // value of first bucket
@@ -743,7 +676,7 @@ void MetricsCollector::SendAndResetDailyUseSample(
 }
 
 void MetricsCollector::SendAndResetCrashIntervalSample(
-    const scoped_ptr<PersistentInteger>& interval) {
+    const unique_ptr<PersistentInteger>& interval) {
   SendSample(interval->Name(),
              interval->GetAndClear(),
              1,                        // value of first bucket
@@ -752,7 +685,7 @@ void MetricsCollector::SendAndResetCrashIntervalSample(
 }
 
 void MetricsCollector::SendAndResetCrashFrequencySample(
-    const scoped_ptr<PersistentInteger>& frequency) {
+    const unique_ptr<PersistentInteger>& frequency) {
   SendSample(frequency->Name(),
              frequency->GetAndClear(),
              1,                        // value of first bucket
