@@ -876,47 +876,14 @@ static void selinux_init_all_handles(void)
 
 enum selinux_enforcing_status { SELINUX_DISABLED, SELINUX_PERMISSIVE, SELINUX_ENFORCING };
 
-static selinux_enforcing_status selinux_status_from_cmdline() {
-    selinux_enforcing_status status = SELINUX_ENFORCING;
-
-    std::function<void(char*,bool)> fn = [&](char* name, bool in_qemu) {
-        char *value = strchr(name, '=');
-        if (value == nullptr) { return; }
-        *value++ = '\0';
-        if (strcmp(name, "androidboot.selinux") == 0) {
-            if (strcmp(value, "disabled") == 0) {
-                status = SELINUX_DISABLED;
-            } else if (strcmp(value, "permissive") == 0) {
-                status = SELINUX_PERMISSIVE;
-            }
-        }
-    };
-    import_kernel_cmdline(false, fn);
-
-    return status;
-}
-
-
 static bool selinux_is_disabled(void)
 {
-    if (ALLOW_DISABLE_SELINUX) {
-        if (access("/sys/fs/selinux", F_OK) != 0) {
-            // SELinux is not compiled into the kernel, or has been disabled
-            // via the kernel command line "selinux=0".
-            return true;
-        }
-        return selinux_status_from_cmdline() == SELINUX_DISABLED;
-    }
-
     return false;
 }
 
 static bool selinux_is_enforcing(void)
 {
-    if (ALLOW_DISABLE_SELINUX) {
-        return selinux_status_from_cmdline() == SELINUX_ENFORCING;
-    }
-    return true;
+    return false;
 }
 
 int selinux_reload_policy(void)
