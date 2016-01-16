@@ -19,7 +19,6 @@ crash_reporter_cpp_extension := .cc
 crash_reporter_src := crash_collector.cc \
     kernel_collector.cc \
     kernel_warning_collector.cc \
-    udev_collector.cc \
     unclean_shutdown_collector.cc \
     user_collector.cc
 
@@ -29,7 +28,6 @@ crash_reporter_test_src := crash_collector_test.cc \
     crash_reporter_logs_test.cc \
     kernel_collector_test.cc \
     testrunner.cc \
-    udev_collector_test.cc \
     unclean_shutdown_collector_test.cc \
     user_collector_test.cc
 
@@ -41,7 +39,6 @@ include $(CLEAR_VARS)
 LOCAL_MODULE := libcrash
 LOCAL_CPP_EXTENSION := $(crash_reporter_cpp_extension)
 LOCAL_C_INCLUDES := $(crash_reporter_includes)
-LOCAL_RTTI_FLAG := -frtti
 LOCAL_SHARED_LIBRARIES := libchrome \
     libbinder \
     libbrillo \
@@ -63,7 +60,6 @@ LOCAL_REQUIRED_MODULES := core2md \
     crash_sender \
     crash_server
 LOCAL_INIT_RC := crash_reporter.rc
-LOCAL_RTTI_FLAG := -frtti
 LOCAL_SHARED_LIBRARIES := libchrome \
     libbinder \
     libbrillo \

@@ -282,8 +282,6 @@ static void usage() {
             "  getvar <variable>                        Display a bootloader variable.\n"
             "  set_active <suffix>                      Sets the active slot. If slots are\n"
             "                                           not supported, this does nothing.\n"
-            "                                           note: suffixes starting with a '-'\n"
-            "                                           must use set_active -- <suffix>\n"
             "  boot <kernel> [ <ramdisk> [ <second> ] ] Download and boot kernel.\n"
             "  flash:raw boot <kernel> [ <ramdisk> [ <second> ] ]\n"
             "                                           Create bootimage and flash it.\n"
@@ -320,9 +318,10 @@ static void usage() {
             "                                           device supports slots. This will be\n"
             "                                           added to all partition names that use\n"
             "                                           slots. 'all' can be given to refer\n"
-            "                                           to all slots. If this is not given,\n"
-            "                                           slotted partitions will default to\n"
-            "                                           the current active slot.\n"
+            "                                           to all slots. 'other' can be given to\n"
+            "                                           refer to a non-current slot. If this\n"
+            "                                           flag is not used, slotted partitions\n"
+            "                                           will default to the current active slot.\n"
             "  -a, --set-active[=<suffix>]              Sets the active slot. If no suffix is\n"
             "                                           provided, this will default to the value\n"
             "                                           given by --slot. If slots are not\n"
@@ -739,12 +738,28 @@ static std::string verify_slot(Transport* transport, const char *slot, bool allo
             if (!suffixes.empty()) {
                 return suffixes[0];
             } else {
-                fprintf(stderr, "No known slots.\n");
-                exit(1);
+                die("No known slots.");
             }
         }
     }
+
     std::vector<std::string> suffixes = get_suffixes(transport);
+
+    if (strcmp(slot, "other") == 0) {
+        std::string current_slot;
+        if (!fb_getvar(transport, "current-slot", &current_slot)) {
+            die("Failed to identify current slot.");
+        }
+        if (!suffixes.empty()) {
+            for (size_t i = 0; i < suffixes.size(); i++) {
+                if (current_slot == suffixes[i])
+                    return suffixes[(i+1)%suffixes.size()];
+            }
+        } else {
+            die("No known slots.");
+        }
+    }
+
     for (const std::string &suffix : suffixes) {
         if (suffix == slot)
             return slot;
@@ -1411,7 +1426,6 @@ int main(int argc, char **argv)
             std::string slot = verify_slot(transport, argv[1], false);
             fb_set_active(slot.c_str());
             skip(2);
-            wants_reboot = true;
         } else if(!strcmp(*argv, "oem")) {
             argc = do_oem_command(argc, argv);
         } else if(!strcmp(*argv, "flashing")) {

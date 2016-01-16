@@ -32,7 +32,7 @@
 #include "LogReader.h"
 
 // Default
-#define LOG_BUFFER_SIZE (256 * 1024) // Tuned on a per-platform basis here?
+#define LOG_BUFFER_SIZE (256 * 1024) // Tuned with ro.logd.size per-platform
 #define log_buffer_size(id) mMaxSize[id]
 #define LOG_BUFFER_MIN_SIZE (64 * 1024UL)
 #define LOG_BUFFER_MAX_SIZE (256 * 1024 * 1024UL)
@@ -109,6 +109,9 @@ void LogBuffer::init() {
     }
 
     log_id_for_each(i) {
+        mLastSet[i] = false;
+        mLast[i] = mLogElements.begin();
+
         char key[PROP_NAME_MAX];
 
         snprintf(key, sizeof(key), "%s.%s",
@@ -205,20 +208,16 @@ int LogBuffer::log(log_id_t log_id, log_time realtime,
 
     LogBufferElement *elem = new LogBufferElement(log_id, realtime,
                                                   uid, pid, tid, msg, len);
-    if (log_id != LOG_ID_SECURITY) { // whitelist LOG_ID_SECURITY
+    if (log_id != LOG_ID_SECURITY) {
         int prio = ANDROID_LOG_INFO;
-        const char *tag = (const char *)-1;
+        const char *tag = NULL;
         if (log_id == LOG_ID_EVENTS) {
-            // whitelist "snet_event_log"
-            if (elem->getTag() != SNET_EVENT_LOG_TAG) {
-                tag = android::tagToName(elem->getTag());
-            }
+            tag = android::tagToName(elem->getTag());
         } else {
             prio = *msg;
             tag = msg + 1;
         }
-        if ((tag != (const char *)-1) &&
-                !__android_log_is_loggable(prio, tag, ANDROID_LOG_VERBOSE)) {
+        if (!__android_log_is_loggable(prio, tag, ANDROID_LOG_VERBOSE)) {
             // Log traffic received to total
             pthread_mutex_lock(&mLogElementsLock);
             stats.add(elem);
@@ -333,7 +332,15 @@ LogBufferElementCollection::iterator LogBuffer::erase(
         }
     }
 
+    bool setLast = mLastSet[id] && (it == mLast[id]);
     it = mLogElements.erase(it);
+    if (setLast) {
+        if (it == mLogElements.end()) { // unlikely
+            mLastSet[id] = false;
+        } else {
+            mLast[id] = it;
+        }
+    }
     if (coalesce) {
         stats.erase(element);
     } else {
@@ -494,12 +501,18 @@ bool LogBuffer::prune(log_id_t id, unsigned long pruneRows, uid_t caller_uid) {
 
     if (caller_uid != AID_ROOT) {
         // Only here if clearAll condition (pruneRows == ULONG_MAX)
-        for(it = mLogElements.begin(); it != mLogElements.end();) {
+        it = mLastSet[id] ? mLast[id] : mLogElements.begin();
+        while (it != mLogElements.end()) {
             LogBufferElement *element = *it;
 
             if ((element->getLogId() != id) || (element->getUid() != caller_uid)) {
                 ++it;
                 continue;
+            }
+
+            if (!mLastSet[id] || ((*mLast[id])->getLogId() != id)) {
+                mLast[id] = it;
+                mLastSet[id] = true;
             }
 
             if (oldest && (oldest->mStart <= element->getSequence())) {
@@ -570,7 +583,7 @@ bool LogBuffer::prune(log_id_t id, unsigned long pruneRows, uid_t caller_uid) {
 
         bool kick = false;
         bool leading = true;
-        it = mLogElements.begin();
+        it = mLastSet[id] ? mLast[id] : mLogElements.begin();
         // Perform at least one mandatory garbage collection cycle in following
         // - clear leading chatty tags
         // - coalesce chatty tags
@@ -617,6 +630,11 @@ bool LogBuffer::prune(log_id_t id, unsigned long pruneRows, uid_t caller_uid) {
             if (element->getLogId() != id) {
                 ++it;
                 continue;
+            }
+
+            if (leading && (!mLastSet[id] || ((*mLast[id])->getLogId() != id))) {
+                mLast[id] = it;
+                mLastSet[id] = true;
             }
 
             unsigned short dropped = element->getDropped();
@@ -729,13 +747,18 @@ bool LogBuffer::prune(log_id_t id, unsigned long pruneRows, uid_t caller_uid) {
 
     bool whitelist = false;
     bool hasWhitelist = (id != LOG_ID_SECURITY) && mPrune.nice() && !clearAll;
-    it = mLogElements.begin();
+    it = mLastSet[id] ? mLast[id] : mLogElements.begin();
     while((pruneRows > 0) && (it != mLogElements.end())) {
         LogBufferElement *element = *it;
 
         if (element->getLogId() != id) {
             it++;
             continue;
+        }
+
+        if (!mLastSet[id] || ((*mLast[id])->getLogId() != id)) {
+            mLast[id] = it;
+            mLastSet[id] = true;
         }
 
         if (oldest && (oldest->mStart <= element->getSequence())) {
@@ -768,13 +791,18 @@ bool LogBuffer::prune(log_id_t id, unsigned long pruneRows, uid_t caller_uid) {
 
     // Do not save the whitelist if we are reader range limited
     if (whitelist && (pruneRows > 0)) {
-        it = mLogElements.begin();
+        it = mLastSet[id] ? mLast[id] : mLogElements.begin();
         while((it != mLogElements.end()) && (pruneRows > 0)) {
             LogBufferElement *element = *it;
 
             if (element->getLogId() != id) {
                 ++it;
                 continue;
+            }
+
+            if (!mLastSet[id] || ((*mLast[id])->getLogId() != id)) {
+                mLast[id] = it;
+                mLastSet[id] = true;
             }
 
             if (oldest && (oldest->mStart <= element->getSequence())) {

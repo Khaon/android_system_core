@@ -14,21 +14,4 @@
  * limitations under the License.
  */
 
-#include "metrics_collector_service_trampoline.h"
-#include "metrics_collector.h"
-#include "metrics_collector_service_impl.h"
-
-MetricsCollectorServiceTrampoline::MetricsCollectorServiceTrampoline(
-    MetricsCollector* metrics_collector) {
-  metrics_collector_ = metrics_collector;
-}
-
-void MetricsCollectorServiceTrampoline::Run() {
-  // Start metricscollectorservice binder service
-  metrics_collector_service.reset(new BnMetricsCollectorServiceImpl(this));
-  metrics_collector_service->Run();
-}
-
-void MetricsCollectorServiceTrampoline::ProcessUserCrash() {
-  metrics_collector_->ProcessUserCrash();
-}
+extern "C" int selinux_android_restorecon(const char*, unsigned int);

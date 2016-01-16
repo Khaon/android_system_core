@@ -14,21 +14,24 @@
  * limitations under the License.
  */
 
-#include <stdio.h>
-#include <errno.h>
-#include <signal.h>
-#include <pthread.h>
-#include <stdarg.h>
-#include <fcntl.h>
-#include <sys/types.h>
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <sys/types.h>
 #include <time.h>
 
-#include <sys/ptrace.h>
-#include <sys/wait.h>
 #include <elf.h>
-#include <sys/stat.h>
 #include <sys/poll.h>
+#include <sys/prctl.h>
+#include <sys/ptrace.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+
+#include <set>
 
 #include <selinux/android.h>
 
@@ -70,7 +73,7 @@ static void wait_for_user_action(const debugger_request_t& request) {
         "* Process %d has been suspended while crashing.\n"
         "* To attach gdbserver and start gdb, run this on the host:\n"
         "*\n"
-        "*     gdbclient %d\n"
+        "*     gdbclient.py -p %d\n"
         "*\n"
         "* Wait for gdb to start, then press the VOLUME DOWN key\n"
         "* to let the process continue crashing.\n"
@@ -78,16 +81,13 @@ static void wait_for_user_action(const debugger_request_t& request) {
         request.pid, request.tid);
 
   // Wait for VOLUME DOWN.
-  if (init_getevent() == 0) {
-    while (true) {
-      input_event e;
-      if (get_event(&e, -1) == 0) {
-        if (e.type == EV_KEY && e.code == KEY_VOLUMEDOWN && e.value == 0) {
-          break;
-        }
+  while (true) {
+    input_event e;
+    if (get_event(&e, -1) == 0) {
+      if (e.type == EV_KEY && e.code == KEY_VOLUMEDOWN && e.value == 0) {
+        break;
       }
     }
-    uninit_getevent();
   }
 
   ALOGI("debuggerd resuming process %d", request.pid);
@@ -334,6 +334,180 @@ static void redirect_to_32(int fd, debugger_request_t* request) {
 }
 #endif
 
+static void ptrace_siblings(pid_t pid, pid_t main_tid, std::set<pid_t>& tids) {
+  char task_path[64];
+
+  snprintf(task_path, sizeof(task_path), "/proc/%d/task", pid);
+
+  std::unique_ptr<DIR, int (*)(DIR*)> d(opendir(task_path), closedir);
+
+  // Bail early if the task directory cannot be opened.
+  if (!d) {
+    ALOGE("debuggerd: failed to open /proc/%d/task: %s", pid, strerror(errno));
+    return;
+  }
+
+  struct dirent* de;
+  while ((de = readdir(d.get())) != NULL) {
+    // Ignore "." and "..".
+    if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) {
+      continue;
+    }
+
+    char* end;
+    pid_t tid = strtoul(de->d_name, &end, 10);
+    if (*end) {
+      continue;
+    }
+
+    if (tid == main_tid) {
+      continue;
+    }
+
+    if (ptrace(PTRACE_ATTACH, tid, 0, 0) < 0) {
+      ALOGE("debuggerd: ptrace attach to %d failed: %s", tid, strerror(errno));
+      continue;
+    }
+
+    tids.insert(tid);
+  }
+}
+
+static bool perform_dump(const debugger_request_t& request, int fd, int tombstone_fd,
+                         BacktraceMap* backtrace_map, const std::set<pid_t>& siblings) {
+  if (TEMP_FAILURE_RETRY(write(fd, "\0", 1)) != 1) {
+    ALOGE("debuggerd: failed to respond to client: %s\n", strerror(errno));
+    return false;
+  }
+
+  int total_sleep_time_usec = 0;
+  while (true) {
+    int signal = wait_for_signal(request.tid, &total_sleep_time_usec);
+    switch (signal) {
+      case -1:
+        ALOGE("debuggerd: timed out waiting for signal");
+        return false;
+
+      case SIGSTOP:
+        if (request.action == DEBUGGER_ACTION_DUMP_TOMBSTONE) {
+          ALOGV("debuggerd: stopped -- dumping to tombstone");
+          engrave_tombstone(tombstone_fd, backtrace_map, request.pid, request.tid, siblings, signal,
+                            request.original_si_code, request.abort_msg_address);
+        } else if (request.action == DEBUGGER_ACTION_DUMP_BACKTRACE) {
+          ALOGV("debuggerd: stopped -- dumping to fd");
+          dump_backtrace(fd, -1, backtrace_map, request.pid, request.tid, siblings);
+        } else {
+          ALOGV("debuggerd: stopped -- continuing");
+          if (ptrace(PTRACE_CONT, request.tid, 0, 0) != 0) {
+            ALOGE("debuggerd: ptrace continue failed: %s", strerror(errno));
+            return false;
+          }
+          continue;  // loop again
+        }
+        break;
+
+      case SIGABRT:
+      case SIGBUS:
+      case SIGFPE:
+      case SIGILL:
+      case SIGSEGV:
+#ifdef SIGSTKFLT
+      case SIGSTKFLT:
+#endif
+      case SIGTRAP:
+        ALOGV("stopped -- fatal signal\n");
+        // Send a SIGSTOP to the process to make all of
+        // the non-signaled threads stop moving.  Without
+        // this we get a lot of "ptrace detach failed:
+        // No such process".
+        kill(request.pid, SIGSTOP);
+        engrave_tombstone(tombstone_fd, backtrace_map, request.pid, request.tid, siblings, signal,
+                          request.original_si_code, request.abort_msg_address);
+        break;
+
+      default:
+        ALOGE("debuggerd: process stopped due to unexpected signal %d\n", signal);
+        break;
+    }
+    break;
+  }
+
+  return true;
+}
+
+static bool drop_privileges() {
+  if (setresgid(AID_DEBUGGERD, AID_DEBUGGERD, AID_DEBUGGERD) != 0) {
+    ALOGE("debuggerd: failed to setresgid");
+    return false;
+  }
+
+  if (setresuid(AID_DEBUGGERD, AID_DEBUGGERD, AID_DEBUGGERD) != 0) {
+    ALOGE("debuggerd: failed to setresuid");
+    return false;
+  }
+
+  return true;
+}
+
+static bool fork_signal_sender(int* in_fd, int* out_fd, pid_t* sender_pid, pid_t target_pid) {
+  int input_pipe[2];
+  int output_pipe[2];
+  if (pipe(input_pipe) != 0) {
+    ALOGE("debuggerd: failed to create input pipe for signal sender: %s", strerror(errno));
+    return false;
+  }
+
+  if (pipe(output_pipe) != 0) {
+    close(input_pipe[0]);
+    close(input_pipe[1]);
+    ALOGE("debuggerd: failed to create output pipe for signal sender: %s", strerror(errno));
+    return false;
+  }
+
+  pid_t fork_pid = fork();
+  if (fork_pid == -1) {
+    ALOGE("debuggerd: failed to initialize signal sender: fork failed: %s", strerror(errno));
+    return false;
+  } else if (fork_pid == 0) {
+    close(input_pipe[1]);
+    close(output_pipe[0]);
+    auto wait = [=]() {
+      char buf[1];
+      if (TEMP_FAILURE_RETRY(read(input_pipe[0], buf, 1)) != 1) {
+        ALOGE("debuggerd: signal sender failed to read from pipe");
+        exit(1);
+      }
+    };
+    auto notify_done = [=]() {
+      if (TEMP_FAILURE_RETRY(write(output_pipe[1], "", 1)) != 1) {
+        ALOGE("debuggerd: signal sender failed to write to pipe");
+        exit(1);
+      }
+    };
+
+    wait();
+    if (kill(target_pid, SIGSTOP) != 0) {
+      ALOGE("debuggerd: failed to stop target '%d': %s", target_pid, strerror(errno));
+    }
+    notify_done();
+
+    wait();
+    if (kill(target_pid, SIGCONT) != 0) {
+      ALOGE("debuggerd: failed to resume target '%d': %s", target_pid, strerror(errno));
+    }
+    notify_done();
+
+    exit(0);
+  } else {
+    close(input_pipe[0]);
+    close(output_pipe[1]);
+    *in_fd = input_pipe[1];
+    *out_fd = output_pipe[0];
+    *sender_pid = fork_pid;
+    return true;
+  }
+}
+
 static void handle_request(int fd) {
   ALOGV("handle_request(%d)\n", fd);
 
@@ -363,6 +537,37 @@ static void handle_request(int fd) {
   }
 #endif
 
+  // Fork a child to handle the rest of the request.
+  pid_t fork_pid = fork();
+  if (fork_pid == -1) {
+    ALOGE("debuggerd: failed to fork: %s\n", strerror(errno));
+    return;
+  } else if (fork_pid != 0) {
+    waitpid(fork_pid, nullptr, 0);
+    return;
+  }
+
+  // Open the tombstone file if we need it.
+  std::string tombstone_path;
+  int tombstone_fd = -1;
+  switch (request.action) {
+    case DEBUGGER_ACTION_DUMP_TOMBSTONE:
+    case DEBUGGER_ACTION_CRASH:
+      tombstone_fd = open_tombstone(&tombstone_path);
+      if (tombstone_fd == -1) {
+        ALOGE("debuggerd: failed to open tombstone file: %s\n", strerror(errno));
+        exit(1);
+      }
+      break;
+
+    case DEBUGGER_ACTION_DUMP_BACKTRACE:
+      break;
+
+    default:
+      ALOGE("debuggerd: unexpected request action: %d", request.action);
+      exit(1);
+  }
+
   // At this point, the thread that made the request is blocked in
   // a read() call.  If the thread has crashed, then this gives us
   // time to PTRACE_ATTACH to it before it has a chance to really fault.
@@ -373,111 +578,88 @@ static void handle_request(int fd) {
   // ensure that it can run as soon as we call PTRACE_CONT below.
   // See details in bionic/libc/linker/debugger.c, in function
   // debugger_signal_handler().
-  if (ptrace(PTRACE_ATTACH, request.tid, 0, 0)) {
-    ALOGE("ptrace attach failed: %s\n", strerror(errno));
-    return;
+
+  // Attach to the target process.
+  if (ptrace(PTRACE_ATTACH, request.tid, 0, 0) != 0) {
+    ALOGE("debuggerd: ptrace attach failed: %s", strerror(errno));
+    exit(1);
   }
 
-  bool detach_failed = false;
-  bool tid_unresponsive = false;
+  // Don't attach to the sibling threads if we want to attach gdb.
+  // Supposedly, it makes the process less reliable.
   bool attach_gdb = should_attach_gdb(&request);
-  if (TEMP_FAILURE_RETRY(write(fd, "\0", 1)) != 1) {
-    ALOGE("failed responding to client: %s\n", strerror(errno));
-    return;
-  }
-
-  std::unique_ptr<char> tombstone_path;
-  int total_sleep_time_usec = 0;
-  while (true) {
-    int signal = wait_for_sigstop(request.tid, &total_sleep_time_usec, &detach_failed);
-    if (signal == -1) {
-      tid_unresponsive = true;
-      break;
+  int signal_in_fd = -1;
+  int signal_out_fd = -1;
+  pid_t signal_pid = 0;
+  if (attach_gdb) {
+    // Open all of the input devices we need to listen for VOLUMEDOWN before dropping privileges.
+    if (init_getevent() != 0) {
+      ALOGE("debuggerd: failed to initialize input device, not waiting for gdb");
+      attach_gdb = false;
     }
 
-    switch (signal) {
-      case SIGSTOP:
-        if (request.action == DEBUGGER_ACTION_DUMP_TOMBSTONE) {
-          ALOGV("stopped -- dumping to tombstone\n");
-          tombstone_path.reset(engrave_tombstone(
-            request.pid, request.tid, signal, request.original_si_code, request.abort_msg_address,
-            true, &detach_failed, &total_sleep_time_usec));
-        } else if (request.action == DEBUGGER_ACTION_DUMP_BACKTRACE) {
-          ALOGV("stopped -- dumping to fd\n");
-          dump_backtrace(fd, -1, request.pid, request.tid, &detach_failed, &total_sleep_time_usec);
-        } else {
-          ALOGV("stopped -- continuing\n");
-          status = ptrace(PTRACE_CONT, request.tid, 0, 0);
-          if (status) {
-            ALOGE("ptrace continue failed: %s\n", strerror(errno));
-          }
-          continue;  // loop again
+    // Fork a process that stays root, and listens on a pipe to pause and resume the target.
+    if (!fork_signal_sender(&signal_in_fd, &signal_out_fd, &signal_pid, request.pid)) {
+      attach_gdb = false;
+    }
+  }
+
+  auto notify_signal_sender = [=]() {
+    char buf[1];
+    if (TEMP_FAILURE_RETRY(write(signal_in_fd, "", 1)) != 1) {
+      ALOGE("debuggerd: failed to notify signal process: %s", strerror(errno));
+    } else if (TEMP_FAILURE_RETRY(read(signal_out_fd, buf, 1)) != 1) {
+      ALOGE("debuggerd: failed to read response from signal process: %s", strerror(errno));
+    }
+  };
+
+  std::set<pid_t> siblings;
+  if (!attach_gdb) {
+    ptrace_siblings(request.pid, request.tid, siblings);
+  }
+
+  // Generate the backtrace map before dropping privileges.
+  std::unique_ptr<BacktraceMap> backtrace_map(BacktraceMap::Create(request.pid));
+
+  bool succeeded = false;
+
+  // Now that we've done everything that requires privileges, we can drop them.
+  if (drop_privileges()) {
+    succeeded = perform_dump(request, fd, tombstone_fd, backtrace_map.get(), siblings);
+    if (succeeded) {
+      if (request.action == DEBUGGER_ACTION_DUMP_TOMBSTONE) {
+        if (!tombstone_path.empty()) {
+          write(fd, tombstone_path.c_str(), tombstone_path.length());
         }
-        break;
-
-      case SIGABRT:
-      case SIGBUS:
-      case SIGFPE:
-      case SIGILL:
-      case SIGSEGV:
-#ifdef SIGSTKFLT
-      case SIGSTKFLT:
-#endif
-      case SIGTRAP:
-        ALOGV("stopped -- fatal signal\n");
-        // Send a SIGSTOP to the process to make all of
-        // the non-signaled threads stop moving.  Without
-        // this we get a lot of "ptrace detach failed:
-        // No such process".
-        kill(request.pid, SIGSTOP);
-        // don't dump sibling threads when attaching to GDB because it
-        // makes the process less reliable, apparently...
-        tombstone_path.reset(engrave_tombstone(
-          request.pid, request.tid, signal, request.original_si_code, request.abort_msg_address,
-          !attach_gdb, &detach_failed, &total_sleep_time_usec));
-        break;
-
-      default:
-        ALOGE("process stopped due to unexpected signal %d\n", signal);
-        break;
+      }
     }
-    break;
-  }
 
-  if (request.action == DEBUGGER_ACTION_DUMP_TOMBSTONE) {
-    if (tombstone_path) {
-      write(fd, tombstone_path.get(), strlen(tombstone_path.get()));
-    }
-  }
-
-  if (!tid_unresponsive) {
-    ALOGV("detaching");
     if (attach_gdb) {
-      // stop the process so we can debug
-      kill(request.pid, SIGSTOP);
-    }
-    if (ptrace(PTRACE_DETACH, request.tid, 0, 0)) {
-      ALOGE("ptrace detach from %d failed: %s", request.tid, strerror(errno));
-      detach_failed = true;
-    } else if (attach_gdb) {
-      // if debug.db.uid is set, its value indicates if we should wait
-      // for user action for the crashing process.
-      // in this case, we log a message and turn the debug LED on
-      // waiting for a gdb connection (for instance)
-      wait_for_user_action(request);
+      // Tell the signal process to send SIGSTOP to the target.
+      notify_signal_sender();
     }
   }
 
-  // resume stopped process (so it can crash in peace).
-  kill(request.pid, SIGCONT);
-
-  // If we didn't successfully detach, we're still the parent, and the
-  // actual parent won't receive a death notification via wait(2).  At this point
-  // there's not much we can do about that.
-  if (detach_failed) {
-    ALOGE("debuggerd committing suicide to free the zombie!\n");
-    kill(getpid(), SIGKILL);
+  if (ptrace(PTRACE_DETACH, request.tid, 0, 0) != 0) {
+    ALOGE("debuggerd: ptrace detach from %d failed: %s", request.tid, strerror(errno));
   }
+
+  for (pid_t sibling : siblings) {
+    ptrace(PTRACE_DETACH, sibling, 0, 0);
+  }
+
+  // Wait for gdb, if requested.
+  if (attach_gdb && succeeded) {
+    wait_for_user_action(request);
+
+    // Tell the signal process to send SIGCONT to the target.
+    notify_signal_sender();
+
+    uninit_getevent();
+    waitpid(signal_pid, nullptr, 0);
+  }
+
+  exit(!succeeded);
 }
 
 static int do_server() {
