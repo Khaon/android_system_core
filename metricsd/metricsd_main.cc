@@ -14,21 +14,15 @@
  * limitations under the License.
  */
 
-#include <thread>
-
-#include <base/at_exit.h>
 #include <base/command_line.h>
 #include <base/files/file_path.h>
 #include <base/logging.h>
-#include <base/metrics/statistics_recorder.h>
-#include <base/strings/string_util.h>
 #include <base/time/time.h>
 #include <brillo/flag_helper.h>
 #include <brillo/syslog_logging.h>
 
 #include "constants.h"
-#include "uploader/bn_metricsd_impl.h"
-#include "uploader/crash_counters.h"
+#include "uploader/metricsd_service_runner.h"
 #include "uploader/upload_service.h"
 
 int main(int argc, char** argv) {
@@ -39,10 +33,13 @@ int main(int argc, char** argv) {
 
   // Upload Service flags.
   DEFINE_int32(upload_interval_secs, 1800,
-               "Interval at which metrics_daemon sends the metrics. (needs "
-               "-uploader)");
+               "Interval at which metricsd uploads the metrics.");
+  DEFINE_int32(disk_persistence_interval_secs, 300,
+               "Interval at which metricsd saves the aggregated metrics to "
+               "disk to avoid losing them if metricsd stops in between "
+               "two uploads.");
   DEFINE_string(server, metrics::kMetricsServer,
-                "Server to upload the metrics to. (needs -uploader)");
+                "Server to upload the metrics to.");
   DEFINE_string(private_directory, metrics::kMetricsdDirectory,
                 "Path to the private directory used by metricsd "
                 "(testing only)");
@@ -76,18 +73,11 @@ int main(int argc, char** argv) {
     return errno;
   }
 
-  std::shared_ptr<CrashCounters> counters(new CrashCounters);
-
   UploadService upload_service(
       FLAGS_server, base::TimeDelta::FromSeconds(FLAGS_upload_interval_secs),
+      base::TimeDelta::FromSeconds(FLAGS_disk_persistence_interval_secs),
       base::FilePath(FLAGS_private_directory),
-      base::FilePath(FLAGS_shared_directory), counters);
+      base::FilePath(FLAGS_shared_directory));
 
-  base::StatisticsRecorder::Initialize();
-
-  // Create and start the binder thread.
-  BnMetricsdImpl binder_service(counters);
-  std::thread binder_thread(&BnMetricsdImpl::Run, &binder_service);
-
-  upload_service.Run();
+  return upload_service.Run();
 }

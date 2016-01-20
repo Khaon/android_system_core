@@ -38,6 +38,7 @@ metricsd_common := \
   uploader/metrics_hashes.cc \
   uploader/metrics_log_base.cc \
   uploader/metrics_log.cc \
+  uploader/metricsd_service_runner.cc \
   uploader/sender_http.cc \
   uploader/system_profile_cache.cc \
   uploader/upload_service.cc
@@ -84,6 +85,7 @@ metrics_collector_static_libraries := libmetricscollectorservice
 metricsd_shared_libraries := \
   libbinder \
   libbrillo \
+  libbrillo-binder \
   libbrillo-http \
   libchrome \
   libprotobuf-cpp-lite \
@@ -200,6 +202,9 @@ LOCAL_CPPFLAGS := $(metrics_CPPFLAGS) -Wno-sign-compare
 LOCAL_SHARED_LIBRARIES := $(metricsd_shared_libraries)
 LOCAL_SRC_FILES := $(metricsd_tests_sources) $(metricsd_common)
 LOCAL_STATIC_LIBRARIES := libBionicGtestMain libgmock metricsd_protos metricsd_binder_proxy
+ifdef BRILLO
+LOCAL_MODULE_TAGS := debug
+endif
 include $(BUILD_NATIVE_TEST)
 
 # Unit tests for metrics_collector.
@@ -215,6 +220,9 @@ LOCAL_SRC_FILES := $(metrics_collector_tests_sources) \
   $(metrics_collector_common)
 LOCAL_STATIC_LIBRARIES := libBionicGtestMain libgmock metricsd_binder_proxy \
   $(metrics_collector_static_libraries)
+ifdef BRILLO
+LOCAL_MODULE_TAGS := debug
+endif
 include $(BUILD_NATIVE_TEST)
 
 # Weave schema files

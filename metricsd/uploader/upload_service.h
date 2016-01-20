@@ -28,6 +28,7 @@
 #include "persistent_integer.h"
 #include "uploader/crash_counters.h"
 #include "uploader/metrics_log.h"
+#include "uploader/metricsd_service_runner.h"
 #include "uploader/proto/chrome_user_metrics_extension.pb.h"
 #include "uploader/sender.h"
 #include "uploader/system_profile_cache.h"
@@ -65,19 +66,22 @@ class UploadService : public base::HistogramFlattener, public brillo::Daemon {
  public:
   UploadService(const std::string& server,
                 const base::TimeDelta& upload_interval,
+                const base::TimeDelta& disk_persistence_interval,
                 const base::FilePath& private_metrics_directory,
-                const base::FilePath& shared_metrics_directory,
-                const std::shared_ptr<CrashCounters> counters);
+                const base::FilePath& shared_metrics_directory);
 
   // Initializes the upload service.
-  int OnInit();
+  int OnInit() override;
+
+  // Cleans up the internal state before exiting.
+  void OnShutdown(int* exit_code) override;
 
   // Starts a new log. The log needs to be regenerated after each successful
   // launch as it is destroyed when staging the log.
   void StartNewLog();
 
-  // Event callback for handling MessageLoop events.
-  void UploadEventCallback(const base::TimeDelta& interval);
+  // Saves the current metrics to a file.
+  void PersistToDisk();
 
   // Triggers an upload event.
   void UploadEvent();
@@ -97,6 +101,8 @@ class UploadService : public base::HistogramFlattener, public brillo::Daemon {
   friend class UploadServiceTest;
 
   FRIEND_TEST(UploadServiceTest, CanSendMultipleTimes);
+  FRIEND_TEST(UploadServiceTest, CorruptedSavedLog);
+  FRIEND_TEST(UploadServiceTest, CurrentLogSavedAndResumed);
   FRIEND_TEST(UploadServiceTest, DiscardLogsAfterTooManyFailedUpload);
   FRIEND_TEST(UploadServiceTest, EmptyLogsAreNotSent);
   FRIEND_TEST(UploadServiceTest, FailedSendAreRetried);
@@ -108,6 +114,7 @@ class UploadService : public base::HistogramFlattener, public brillo::Daemon {
   FRIEND_TEST(UploadServiceTest, LogKernelCrash);
   FRIEND_TEST(UploadServiceTest, LogUncleanShutdown);
   FRIEND_TEST(UploadServiceTest, LogUserCrash);
+  FRIEND_TEST(UploadServiceTest, PersistEmptyLog);
   FRIEND_TEST(UploadServiceTest, UnknownCrashIgnored);
   FRIEND_TEST(UploadServiceTest, ValuesInConfigFileAreSent);
 
@@ -118,11 +125,20 @@ class UploadService : public base::HistogramFlattener, public brillo::Daemon {
   // will be discarded.
   static const int kMaxFailedUpload;
 
+  // Loads the log saved to disk if it exists.
+  void LoadSavedLog();
+
   // Resets the internal state.
   void Reset();
 
   // Returns true iff metrics reporting is enabled.
   bool AreMetricsEnabled();
+
+  // Event callback for handling Upload events.
+  void UploadEventCallback();
+
+  // Event callback for handling Persist events.
+  void PersistEventCallback();
 
   // Aggregates all histogram available in memory and store them in the current
   // log.
@@ -153,9 +169,13 @@ class UploadService : public base::HistogramFlattener, public brillo::Daemon {
   std::shared_ptr<CrashCounters> counters_;
 
   base::TimeDelta upload_interval_;
+  base::TimeDelta disk_persistence_interval_;
+
+  MetricsdServiceRunner metricsd_service_runner_;
 
   base::FilePath consent_file_;
   base::FilePath staged_log_path_;
+  base::FilePath saved_log_path_;
 
   bool testing_;
 };
