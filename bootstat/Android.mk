@@ -62,6 +62,8 @@ LOCAL_CPPFLAGS := $(bootstat_cppflags)
 LOCAL_C_INCLUDES := $(bootstat_c_includes)
 LOCAL_SHARED_LIBRARIES := $(bootstat_shared_libs)
 LOCAL_SRC_FILES := $(bootstat_lib_src_files)
+# Clang is required because of C++14
+LOCAL_CLANG := true
 
 include $(BUILD_STATIC_LIBRARY)
 
@@ -76,6 +78,8 @@ LOCAL_CPPFLAGS := $(bootstat_debug_cppflags)
 LOCAL_C_INCLUDES := $(bootstat_c_includes)
 LOCAL_SHARED_LIBRARIES := $(bootstat_shared_libs)
 LOCAL_SRC_FILES := $(bootstat_lib_src_files)
+# Clang is required because of C++14
+LOCAL_CLANG := true
 
 include $(BUILD_STATIC_LIBRARY)
 
@@ -90,6 +94,8 @@ LOCAL_CPPFLAGS := $(bootstat_cppflags)
 LOCAL_C_INCLUDES := $(bootstat_c_includes)
 LOCAL_SHARED_LIBRARIES := $(bootstat_shared_libs)
 LOCAL_SRC_FILES := $(bootstat_lib_src_files)
+# Clang is required because of C++14
+LOCAL_CLANG := true
 
 include $(BUILD_HOST_STATIC_LIBRARY)
 
@@ -105,6 +111,8 @@ LOCAL_C_INCLUDES := $(bootstat_c_includes)
 LOCAL_SHARED_LIBRARIES := $(bootstat_shared_libs)
 LOCAL_STATIC_LIBRARIES := libbootstat
 LOCAL_SRC_FILES := $(bootstat_src_files)
+# Clang is required because of C++14
+LOCAL_CLANG := true
 
 include $(BUILD_EXECUTABLE)
 
@@ -119,6 +127,8 @@ LOCAL_CPPFLAGS := $(bootstat_cppflags)
 LOCAL_SHARED_LIBRARIES := $(bootstat_shared_libs)
 LOCAL_STATIC_LIBRARIES := libbootstat_debug libgmock
 LOCAL_SRC_FILES := $(bootstat_test_src_files)
+# Clang is required because of C++14
+LOCAL_CLANG := true
 
 include $(BUILD_NATIVE_TEST)
 
@@ -133,5 +143,7 @@ LOCAL_CPPFLAGS := $(bootstat_cppflags)
 LOCAL_SHARED_LIBRARIES := $(bootstat_shared_libs)
 LOCAL_STATIC_LIBRARIES := libbootstat_host_debug libgmock_host
 LOCAL_SRC_FILES := $(bootstat_test_src_files)
+# Clang is required because of C++14
+LOCAL_CLANG := true
 
 include $(BUILD_HOST_NATIVE_TEST)
