@@ -32,6 +32,7 @@
 
 #include <cutils/sockets.h>
 
+#include <android-base/errors.h>
 #include <android-base/logging.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
@@ -93,36 +94,6 @@ static const FHClassRec _fh_socket_class = {
         if (!(cond)) fatal("assertion failed '%s' on %s:%d\n", #cond, __FILE__, __LINE__); \
     } while (0)
 
-std::string SystemErrorCodeToString(const DWORD error_code) {
-  const int kErrorMessageBufferSize = 256;
-  WCHAR msgbuf[kErrorMessageBufferSize];
-  DWORD flags = FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS;
-  DWORD len = FormatMessageW(flags, nullptr, error_code, 0, msgbuf,
-                             arraysize(msgbuf), nullptr);
-  if (len == 0) {
-    return android::base::StringPrintf(
-        "Error (%lu) while retrieving error. (%lu)", GetLastError(),
-        error_code);
-  }
-
-  // Convert UTF-16 to UTF-8.
-  std::string msg;
-  if (!android::base::WideToUTF8(msgbuf, &msg)) {
-      return android::base::StringPrintf(
-          "Error (%d) converting from UTF-16 to UTF-8 while retrieving error. (%lu)", errno,
-          error_code);
-  }
-
-  // Messages returned by the system end with line breaks.
-  msg = android::base::Trim(msg);
-  // There are many Windows error messages compared to POSIX, so include the
-  // numeric error code for easier, quicker, accurate identification. Use
-  // decimal instead of hex because there are decimal ranges like 10000-11999
-  // for Winsock.
-  android::base::StringAppendF(&msg, " (%lu)", error_code);
-  return msg;
-}
-
 void handle_deleter::operator()(HANDLE h) {
     // CreateFile() is documented to return INVALID_HANDLE_FILE on error,
     // implying that NULL is a valid handle, but this is probably impossible.
@@ -134,7 +105,7 @@ void handle_deleter::operator()(HANDLE h) {
     if (h != INVALID_HANDLE_VALUE) {
         if (!CloseHandle(h)) {
             D("CloseHandle(%p) failed: %s", h,
-              SystemErrorCodeToString(GetLastError()).c_str());
+              android::base::SystemErrorCodeToString(GetLastError()).c_str());
         }
     }
 }
@@ -470,8 +441,7 @@ int  adb_open(const char*  path, int  options)
                 return -1;
 
             default:
-                D( "unknown error: %s",
-                   SystemErrorCodeToString( err ).c_str() );
+                D("unknown error: %s", android::base::SystemErrorCodeToString(err).c_str());
                 errno = ENOENT;
                 return -1;
         }
@@ -517,8 +487,7 @@ int  adb_creat(const char*  path, int  mode)
                 return -1;
 
             default:
-                D( "unknown error: %s",
-                   SystemErrorCodeToString( err ).c_str() );
+                D("unknown error: %s", android::base::SystemErrorCodeToString(err).c_str());
                 errno = ENOENT;
                 return -1;
         }
@@ -708,7 +677,7 @@ static void _fh_socket_init( FH  f ) {
     f->event     = WSACreateEvent();
     if (f->event == WSA_INVALID_EVENT) {
         D("WSACreateEvent failed: %s",
-          SystemErrorCodeToString(WSAGetLastError()).c_str());
+          android::base::SystemErrorCodeToString(WSAGetLastError()).c_str());
 
         // _event_socket_start assumes that this field is INVALID_HANDLE_VALUE
         // on failure, instead of NULL which is what Windows really returns on
@@ -727,19 +696,19 @@ static int _fh_socket_close( FH  f ) {
             // minimize logging spam, so don't log these errors for now.
 #if 0
             D("socket shutdown failed: %s",
-              SystemErrorCodeToString(WSAGetLastError()).c_str());
+              android::base::SystemErrorCodeToString(WSAGetLastError()).c_str());
 #endif
         }
         if (closesocket(f->fh_socket) == SOCKET_ERROR) {
             D("closesocket failed: %s",
-              SystemErrorCodeToString(WSAGetLastError()).c_str());
+              android::base::SystemErrorCodeToString(WSAGetLastError()).c_str());
         }
         f->fh_socket = INVALID_SOCKET;
     }
     if (f->event != NULL) {
         if (!CloseHandle(f->event)) {
             D("CloseHandle failed: %s",
-              SystemErrorCodeToString(GetLastError()).c_str());
+              android::base::SystemErrorCodeToString(GetLastError()).c_str());
         }
         f->event = NULL;
     }
@@ -760,7 +729,7 @@ static int _fh_socket_read(FH f, void* buf, int len) {
         // that to reduce spam and confusion.
         if (err != WSAEWOULDBLOCK) {
             D("recv fd %d failed: %s", _fh_to_int(f),
-              SystemErrorCodeToString(err).c_str());
+              android::base::SystemErrorCodeToString(err).c_str());
         }
         _socket_set_errno(err);
         result = -1;
@@ -776,7 +745,7 @@ static int _fh_socket_write(FH f, const void* buf, int len) {
         // that to reduce spam and confusion.
         if (err != WSAEWOULDBLOCK) {
             D("send fd %d failed: %s", _fh_to_int(f),
-              SystemErrorCodeToString(err).c_str());
+              android::base::SystemErrorCodeToString(err).c_str());
         }
         _socket_set_errno(err);
         result = -1;
@@ -811,8 +780,8 @@ _init_winsock( void )
         WSADATA  wsaData;
         int      rc = WSAStartup( MAKEWORD(2,2), &wsaData);
         if (rc != 0) {
-            fatal( "adb: could not initialize Winsock: %s",
-                   SystemErrorCodeToString( rc ).c_str());
+            fatal("adb: could not initialize Winsock: %s",
+                  android::base::SystemErrorCodeToString(rc).c_str());
         }
         _winsock_init = 1;
 
@@ -870,7 +839,7 @@ int network_loopback_client(int port, int type, std::string* error) {
     s = socket(AF_INET, type, GetSocketProtocolFromSocketType(type));
     if(s == INVALID_SOCKET) {
         *error = android::base::StringPrintf("cannot create socket: %s",
-                SystemErrorCodeToString(WSAGetLastError()).c_str());
+                android::base::SystemErrorCodeToString(WSAGetLastError()).c_str());
         D("%s", error->c_str());
         return -1;
     }
@@ -881,7 +850,7 @@ int network_loopback_client(int port, int type, std::string* error) {
         const DWORD err = WSAGetLastError();
         *error = android::base::StringPrintf("cannot connect to %s:%u: %s",
                 inet_ntoa(addr.sin_addr), ntohs(addr.sin_port),
-                SystemErrorCodeToString(err).c_str());
+                android::base::SystemErrorCodeToString(err).c_str());
         D("could not connect to %s:%d: %s",
           type != SOCK_STREAM ? "udp" : "tcp", port, error->c_str());
         return -1;
@@ -924,7 +893,7 @@ static int _network_server(int port, int type, u_long interface_address,
     s = socket(AF_INET, type, GetSocketProtocolFromSocketType(type));
     if (s == INVALID_SOCKET) {
         *error = android::base::StringPrintf("cannot create socket: %s",
-                SystemErrorCodeToString(WSAGetLastError()).c_str());
+                android::base::SystemErrorCodeToString(WSAGetLastError()).c_str());
         D("%s", error->c_str());
         return -1;
     }
@@ -938,7 +907,7 @@ static int _network_server(int port, int type, u_long interface_address,
                    sizeof(n)) == SOCKET_ERROR) {
         *error = android::base::StringPrintf(
                 "cannot set socket option SO_EXCLUSIVEADDRUSE: %s",
-                SystemErrorCodeToString(WSAGetLastError()).c_str());
+                android::base::SystemErrorCodeToString(WSAGetLastError()).c_str());
         D("%s", error->c_str());
         return -1;
     }
@@ -948,7 +917,7 @@ static int _network_server(int port, int type, u_long interface_address,
         const DWORD err = WSAGetLastError();
         *error = android::base::StringPrintf("cannot bind to %s:%u: %s",
                 inet_ntoa(addr.sin_addr), ntohs(addr.sin_port),
-                SystemErrorCodeToString(err).c_str());
+                android::base::SystemErrorCodeToString(err).c_str());
         D("could not bind to %s:%d: %s",
           type != SOCK_STREAM ? "udp" : "tcp", port, error->c_str());
         return -1;
@@ -956,7 +925,7 @@ static int _network_server(int port, int type, u_long interface_address,
     if (type == SOCK_STREAM) {
         if (listen(s, LISTEN_BACKLOG) == SOCKET_ERROR) {
             *error = android::base::StringPrintf("cannot listen on socket: %s",
-                    SystemErrorCodeToString(WSAGetLastError()).c_str());
+                    android::base::SystemErrorCodeToString(WSAGetLastError()).c_str());
             D("could not listen on %s:%d: %s",
               type != SOCK_STREAM ? "udp" : "tcp", port, error->c_str());
             return -1;
@@ -1010,7 +979,7 @@ int network_connect(const std::string& host, int port, int type, int timeout, st
     if (getaddrinfo(host.c_str(), port_str, &hints, &addrinfo_ptr) != 0) {
         *error = android::base::StringPrintf(
                 "cannot resolve host '%s' and port %s: %s", host.c_str(),
-                port_str, SystemErrorCodeToString(WSAGetLastError()).c_str());
+                port_str, android::base::SystemErrorCodeToString(WSAGetLastError()).c_str());
         D("%s", error->c_str());
         return -1;
     }
@@ -1025,7 +994,7 @@ int network_connect(const std::string& host, int port, int type, int timeout, st
                       addrinfo->ai_protocol);
     if(s == INVALID_SOCKET) {
         *error = android::base::StringPrintf("cannot create socket: %s",
-                SystemErrorCodeToString(WSAGetLastError()).c_str());
+                android::base::SystemErrorCodeToString(WSAGetLastError()).c_str());
         D("%s", error->c_str());
         return -1;
     }
@@ -1037,7 +1006,7 @@ int network_connect(const std::string& host, int port, int type, int timeout, st
         // TODO: Use WSAAddressToString or inet_ntop on address.
         *error = android::base::StringPrintf("cannot connect to %s:%s: %s",
                 host.c_str(), port_str,
-                SystemErrorCodeToString(WSAGetLastError()).c_str());
+                android::base::SystemErrorCodeToString(WSAGetLastError()).c_str());
         D("could not connect to %s:%s:%s: %s",
           type != SOCK_STREAM ? "udp" : "tcp", host.c_str(), port_str,
           error->c_str());
@@ -1075,7 +1044,7 @@ int  adb_socket_accept(int  serverfd, struct sockaddr*  addr, socklen_t  *addrle
     if (fh->fh_socket == INVALID_SOCKET) {
         const DWORD err = WSAGetLastError();
         LOG(ERROR) << "adb_socket_accept: accept on fd " << serverfd <<
-                      " failed: " + SystemErrorCodeToString(err);
+                      " failed: " + android::base::SystemErrorCodeToString(err);
         _socket_set_errno( err );
         return -1;
     }
@@ -1106,9 +1075,8 @@ int  adb_setsockopt( int  fd, int  level, int  optname, const void*  optval, soc
                              reinterpret_cast<const char*>(optval), optlen );
     if ( result == SOCKET_ERROR ) {
         const DWORD err = WSAGetLastError();
-        D( "adb_setsockopt: setsockopt on fd %d level %d optname %d "
-           "failed: %s\n", fd, level, optname,
-           SystemErrorCodeToString(err).c_str() );
+        D("adb_setsockopt: setsockopt on fd %d level %d optname %d failed: %s\n",
+          fd, level, optname, android::base::SystemErrorCodeToString(err).c_str());
         _socket_set_errno( err );
         result = -1;
     }
@@ -1130,7 +1098,7 @@ int  adb_shutdown(int  fd)
     if (shutdown(f->fh_socket, SD_BOTH) == SOCKET_ERROR) {
         const DWORD err = WSAGetLastError();
         D("socket shutdown fd %d failed: %s", fd,
-          SystemErrorCodeToString(err).c_str());
+          android::base::SystemErrorCodeToString(err).c_str());
         _socket_set_errno(err);
         return -1;
     }
@@ -2483,12 +2451,15 @@ static void  _fh_socketpair_hook( FH  fh, int  events, EventHook  hook )
 }
 
 
+static adb_mutex_t g_console_output_buffer_lock;
+
 void
 adb_sysdeps_init( void )
 {
 #define  ADB_MUTEX(x)  InitializeCriticalSection( & x );
 #include "mutex_list.h"
     InitializeCriticalSection( &_win32_lock );
+    InitializeCriticalSection( &g_console_output_buffer_lock );
 }
 
 /**************************************************************************/
@@ -2557,6 +2528,8 @@ static HANDLE _get_console_handle(int fd, DWORD* mode=nullptr) {
 
 // Returns a console handle if |stream| is a console, otherwise returns nullptr.
 static HANDLE _get_console_handle(FILE* const stream) {
+    // Save and restore errno to make it easier for callers to prevent from overwriting errno.
+    android::base::ErrnoRestorer er;
     const int fd = fileno(stream);
     if (fd < 0) {
         return nullptr;
@@ -2575,7 +2548,7 @@ static bool _get_key_event_record(const HANDLE console, INPUT_RECORD* const inpu
         memset(input_record, 0, sizeof(*input_record));
         if (!ReadConsoleInputA(console, input_record, 1, &read_count)) {
             D("_get_key_event_record: ReadConsoleInputA() failed: %s\n",
-              SystemErrorCodeToString(GetLastError()).c_str());
+              android::base::SystemErrorCodeToString(GetLastError()).c_str());
             errno = EIO;
             return false;
         }
@@ -3328,6 +3301,9 @@ static HANDLE _console_handle;  // when set, console mode should be restored
 
 void stdin_raw_init() {
     const HANDLE in = _get_console_handle(STDIN_FILENO, &_old_console_mode);
+    if (in == nullptr) {
+        return;
+    }
 
     // Disable ENABLE_PROCESSED_INPUT so that Ctrl-C is read instead of
     // calling the process Ctrl-C routine (configured by
@@ -3344,7 +3320,7 @@ void stdin_raw_init() {
     if (!SetConsoleMode(in, new_console_mode)) {
         // This really should not fail.
         D("stdin_raw_init: SetConsoleMode() failed: %s",
-          SystemErrorCodeToString(GetLastError()).c_str());
+          android::base::SystemErrorCodeToString(GetLastError()).c_str());
     }
 
     // Once this is set, it means that stdin has been configured for
@@ -3364,7 +3340,7 @@ void stdin_raw_restore() {
         if (!SetConsoleMode(in, _old_console_mode)) {
             // This really should not fail.
             D("stdin_raw_restore: SetConsoleMode() failed: %s",
-              SystemErrorCodeToString(GetLastError()).c_str());
+              android::base::SystemErrorCodeToString(GetLastError()).c_str());
         }
     }
 }
@@ -3649,16 +3625,98 @@ int adb_chmod(const char* path, int mode) {
     return _wchmod(path_wide.c_str(), mode);
 }
 
-// Internal helper function to write UTF-8 bytes to a console. Returns -1
-// on error.
-static int _console_write_utf8(const char* buf, size_t size, FILE* stream,
-                               HANDLE console) {
-    std::wstring output;
+// From libutils/Unicode.cpp, get the length of a UTF-8 sequence given the lead byte.
+static inline size_t utf8_codepoint_len(uint8_t ch) {
+    return ((0xe5000000 >> ((ch >> 3) & 0x1e)) & 3) + 1;
+}
 
-    // Try to convert from data that might be UTF-8 to UTF-16, ignoring errors.
-    // Data might not be UTF-8 if the user cat's random data, runs dmesg, etc.
+namespace internal {
+
+// Given a sequence of UTF-8 bytes (denoted by the range [first, last)), return the number of bytes
+// (from the beginning) that are complete UTF-8 sequences and append the remaining bytes to
+// remaining_bytes.
+size_t ParseCompleteUTF8(const char* const first, const char* const last,
+                         std::vector<char>* const remaining_bytes) {
+    // Walk backwards from the end of the sequence looking for the beginning of a UTF-8 sequence.
+    // Current_after points one byte past the current byte to be examined.
+    for (const char* current_after = last; current_after != first; --current_after) {
+        const char* const current = current_after - 1;
+        const char ch = *current;
+        const char kHighBit = 0x80u;
+        const char kTwoHighestBits = 0xC0u;
+        if ((ch & kHighBit) == 0) { // high bit not set
+            // The buffer ends with a one-byte UTF-8 sequence, possibly followed by invalid trailing
+            // bytes with no leading byte, so return the entire buffer.
+            break;
+        } else if ((ch & kTwoHighestBits) == kTwoHighestBits) { // top two highest bits set
+            // Lead byte in UTF-8 sequence, so check if we have all the bytes in the sequence.
+            const size_t bytes_available = last - current;
+            if (bytes_available < utf8_codepoint_len(ch)) {
+                // We don't have all the bytes in the UTF-8 sequence, so return all the bytes
+                // preceding the current incomplete UTF-8 sequence and append the remaining bytes
+                // to remaining_bytes.
+                remaining_bytes->insert(remaining_bytes->end(), current, last);
+                return current - first;
+            } else {
+                // The buffer ends with a complete UTF-8 sequence, possibly followed by invalid
+                // trailing bytes with no lead byte, so return the entire buffer.
+                break;
+            }
+        } else {
+            // Trailing byte, so keep going backwards looking for the lead byte.
+        }
+    }
+
+    // Return the size of the entire buffer. It is possible that we walked backward past invalid
+    // trailing bytes with no lead byte, in which case we want to return all those invalid bytes
+    // so that they can be processed.
+    return last - first;
+}
+
+}
+
+// Bytes that have not yet been output to the console because they are incomplete UTF-8 sequences.
+// Note that we use only one buffer even though stderr and stdout are logically separate streams.
+// This matches the behavior of Linux.
+// Protected by g_console_output_buffer_lock.
+static auto& g_console_output_buffer = *new std::vector<char>();
+
+// Internal helper function to write UTF-8 bytes to a console. Returns -1 on error.
+static int _console_write_utf8(const char* const buf, const size_t buf_size, FILE* stream,
+                               HANDLE console) {
+    const int saved_errno = errno;
+    std::vector<char> combined_buffer;
+
+    // Complete UTF-8 sequences that should be immediately written to the console.
+    const char* utf8;
+    size_t utf8_size;
+
+    adb_mutex_lock(&g_console_output_buffer_lock);
+    if (g_console_output_buffer.empty()) {
+        // If g_console_output_buffer doesn't have a buffered up incomplete UTF-8 sequence (the
+        // common case with plain ASCII), parse buf directly.
+        utf8 = buf;
+        utf8_size = internal::ParseCompleteUTF8(buf, buf + buf_size, &g_console_output_buffer);
+    } else {
+        // If g_console_output_buffer has a buffered up incomplete UTF-8 sequence, move it to
+        // combined_buffer (and effectively clear g_console_output_buffer) and append buf to
+        // combined_buffer, then parse it all together.
+        combined_buffer.swap(g_console_output_buffer);
+        combined_buffer.insert(combined_buffer.end(), buf, buf + buf_size);
+
+        utf8 = combined_buffer.data();
+        utf8_size = internal::ParseCompleteUTF8(utf8, utf8 + combined_buffer.size(),
+                                                &g_console_output_buffer);
+    }
+    adb_mutex_unlock(&g_console_output_buffer_lock);
+
+    std::wstring utf16;
+
+    // Try to convert from data that might be UTF-8 to UTF-16, ignoring errors (just like Linux
+    // which does not return an error on bad UTF-8). Data might not be UTF-8 if the user cat's
+    // random data, runs dmesg (which might have non-UTF-8), etc.
     // This could throw std::bad_alloc.
-    (void)android::base::UTF8ToWide(buf, size, &output);
+    (void)android::base::UTF8ToWide(utf8, utf8_size, &utf16);
 
     // Note that this does not do \n => \r\n translation because that
     // doesn't seem necessary for the Windows console. For the Windows
@@ -3671,16 +3729,16 @@ static int _console_write_utf8(const char* buf, size_t size, FILE* stream,
 
     // Write UTF-16 to the console.
     DWORD written = 0;
-    if (!WriteConsoleW(console, output.c_str(), output.length(), &written,
-                       NULL)) {
+    if (!WriteConsoleW(console, utf16.c_str(), utf16.length(), &written, NULL)) {
         errno = EIO;
         return -1;
     }
 
-    // This is the number of UTF-16 chars written, which might be different
-    // than the number of UTF-8 chars passed in. It doesn't seem practical to
-    // get this count correct.
-    return written;
+    // Return the size of the original buffer passed in, signifying that we consumed it all, even
+    // if nothing was displayed, in the case of being passed an incomplete UTF-8 sequence. This
+    // matches the Linux behavior.
+    errno = saved_errno;
+    return buf_size;
 }
 
 // Function prototype because attributes cannot be placed on func definitions.
@@ -3692,14 +3750,21 @@ static int _console_vfprintf(const HANDLE console, FILE* stream,
 // Returns -1 on error.
 static int _console_vfprintf(const HANDLE console, FILE* stream,
                              const char *format, va_list ap) {
+    const int saved_errno = errno;
     std::string output_utf8;
 
     // Format the string.
     // This could throw std::bad_alloc.
     android::base::StringAppendV(&output_utf8, format, ap);
 
-    return _console_write_utf8(output_utf8.c_str(), output_utf8.length(),
-                               stream, console);
+    const int result = _console_write_utf8(output_utf8.c_str(), output_utf8.length(), stream,
+                                           console);
+    if (result != -1) {
+        errno = saved_errno;
+    } else {
+        // If -1 was returned, errno has been set.
+    }
+    return result;
 }
 
 // Version of vfprintf() that takes UTF-8 and can write Unicode to a
@@ -3719,6 +3784,11 @@ int adb_vfprintf(FILE *stream, const char *format, va_list ap) {
         return vfprintf(stream, format, ap);
 #pragma pop_macro("vfprintf")
     }
+}
+
+// Version of vprintf() that takes UTF-8 and can write Unicode to a Windows console.
+int adb_vprintf(const char *format, va_list ap) {
+    return adb_vfprintf(stdout, format, ap);
 }
 
 // Version of fprintf() that takes UTF-8 and can write Unicode to a
@@ -3748,6 +3818,7 @@ int adb_printf(const char *format, ...) {
 int adb_fputs(const char* buf, FILE* stream) {
     // adb_fprintf returns -1 on error, which is conveniently the same as EOF
     // which fputs (and hence adb_fputs) should return on error.
+    static_assert(EOF == -1, "EOF is not -1, so this code needs to be fixed");
     return adb_fprintf(stream, "%s", buf);
 }
 
@@ -3755,32 +3826,32 @@ int adb_fputs(const char* buf, FILE* stream) {
 // Windows console.
 int adb_fputc(int ch, FILE* stream) {
     const int result = adb_fprintf(stream, "%c", ch);
-    if (result <= 0) {
-        // If there was an error, or if nothing was printed (which should be an
-        // error), return an error, which fprintf signifies with EOF.
+    if (result == -1) {
         return EOF;
     }
     // For success, fputc returns the char, cast to unsigned char, then to int.
     return static_cast<unsigned char>(ch);
 }
 
+// Version of putchar() that takes UTF-8 and can write Unicode to a Windows console.
+int adb_putchar(int ch) {
+    return adb_fputc(ch, stdout);
+}
+
+// Version of puts() that takes UTF-8 and can write Unicode to a Windows console.
+int adb_puts(const char* buf) {
+    // adb_printf returns -1 on error, which is conveniently the same as EOF
+    // which puts (and hence adb_puts) should return on error.
+    static_assert(EOF == -1, "EOF is not -1, so this code needs to be fixed");
+    return adb_printf("%s\n", buf);
+}
+
 // Internal function to write UTF-8 to a Win32 console. Returns the number of
 // items (of length size) written. On error, returns a short item count or 0.
 static size_t _console_fwrite(const void* ptr, size_t size, size_t nmemb,
                               FILE* stream, HANDLE console) {
-    // TODO: Note that a Unicode character could be several UTF-8 bytes. But
-    // if we're passed only some of the bytes of a character (for example, from
-    // the network socket for adb shell), we won't be able to convert the char
-    // to a complete UTF-16 char (or surrogate pair), so the output won't look
-    // right.
-    //
-    // To fix this, see libutils/Unicode.cpp for hints on decoding UTF-8.
-    //
-    // For now we ignore this problem because the alternative is that we'd have
-    // to parse UTF-8 and buffer things up (doable). At least this is better
-    // than what we had before -- always incorrect multi-byte UTF-8 output.
-    int result = _console_write_utf8(reinterpret_cast<const char*>(ptr),
-                                     size * nmemb, stream, console);
+    const int result = _console_write_utf8(reinterpret_cast<const char*>(ptr), size * nmemb, stream,
+                                           console);
     if (result == -1) {
         return 0;
     }

@@ -207,6 +207,10 @@ on init
     # enable armv8_deprecated instruction hooks
     write /proc/sys/abi/swp 1
 
+    # Linux's execveat() syscall may construct paths containing /dev/fd
+    # expecting it to point to /proc/self/fd
+    symlink /proc/self/fd /dev/fd
+
 # Healthd can trigger a full boot from charger mode by signaling this
 # property when the power button is held.
 on property:sys.boot_from_charger_mode=1
@@ -305,8 +309,12 @@ on post-fs-data
     chmod 0600 /data/su.img
     mount ext4 loop@/data/su.img /su noatime
 
-    # Make sure we have the device encryption key
+    # Start logd, then start debuggerd to make debugging early-boot crashes easier.
     start logd
+    start debuggerd
+    start debuggerd64
+
+    # Make sure we have the device encryption key.
     start vold
     installkey /data
 
