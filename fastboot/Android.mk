@@ -31,6 +31,7 @@ LOCAL_SRC_FILES := \
     fs.cpp\
     protocol.cpp \
     socket.cpp \
+    tcp.cpp \
     util.cpp \
 
 LOCAL_MODULE := fastboot
@@ -65,6 +66,7 @@ LOCAL_STATIC_LIBRARIES := \
     libdiagnose_usb \
     libbase \
     libcutils \
+    libgtest_host \
 
 # libf2fs_dlutils_host will dlopen("libf2fs_fmt_host_dyn")
 LOCAL_CFLAGS_linux := -DUSE_F2FS
@@ -110,6 +112,8 @@ LOCAL_SRC_FILES := \
     socket.cpp \
     socket_mock.cpp \
     socket_test.cpp \
+    tcp.cpp \
+    tcp_test.cpp \
 
 LOCAL_STATIC_LIBRARIES := libbase libcutils
 
