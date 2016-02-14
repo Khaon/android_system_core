@@ -686,11 +686,7 @@ int fs_mgr_mount_all(struct fstab *fstab)
                               fstab->recs[top_idx].key_loc, strerror(errno));
                     }
                 }
-                if (fs_mgr_do_format(&fstab->recs[top_idx]) == 0) {
-                    /* Let's replay the mount actions. */
-                    i = top_idx - 1;
-                    continue;
-                }
+                continue;
             }
             if (mret && mount_errno != EBUSY && mount_errno != EACCES &&
                 fs_mgr_is_encryptable(&fstab->recs[attempted_idx])) {
