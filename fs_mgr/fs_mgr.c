@@ -106,6 +106,11 @@ static void check_fs(char *blk_device, char *fs_type, char *target)
         blk_device
     };
 
+    /* let's try to identify the given block device's filesystem */
+    char* detected_fs_type = blkid_get_tag_value(NULL, "TYPE", blk_device);
+    if (detected_fs_type)
+        fs_type = detected_fs_type;
+
     /* Check for the types of filesystems we know how to check */
     if (!strcmp(fs_type, "ext2") || !strcmp(fs_type, "ext3") || !strcmp(fs_type, "ext4")) {
         /*
