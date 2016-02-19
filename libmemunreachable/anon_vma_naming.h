@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 The Android Open Source Project
+ * Copyright (C) 2016 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,16 +14,12 @@
  * limitations under the License.
  */
 
-#include <healthd/healthd.h>
+#ifndef LIBMEMUNREACHABLE_ANON_VMA_NAMING_H_
+#define LIBMEMUNREACHABLE_ANON_VMA_NAMING_H_
 
-void healthd_board_init(struct healthd_config*)
-{
-    // use defaults
-}
+#include <sys/prctl.h>
 
+#define PR_SET_VMA            0x53564d41
+#define  PR_SET_VMA_ANON_NAME 0
 
-int healthd_board_battery_update(struct android::BatteryProperties*)
-{
-    // return 0 to log periodic polled battery status to kernel log
-    return 1;
-}
+#endif // LIBMEMUNREACHABLE_ANON_VMA_NAMING_H_

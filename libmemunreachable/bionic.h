@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 The Android Open Source Project
+ * Copyright (C) 2016 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,16 +14,20 @@
  * limitations under the License.
  */
 
-#include <healthd/healthd.h>
+#ifndef LIBMEMUNREACHABLE_BIONIC_H_
+#define LIBMEMUNREACHABLE_BIONIC_H_
 
-void healthd_board_init(struct healthd_config*)
-{
-    // use defaults
-}
+#include <sys/cdefs.h>
 
+__BEGIN_DECLS
 
-int healthd_board_battery_update(struct android::BatteryProperties*)
-{
-    // return 0 to log periodic polled battery status to kernel log
-    return 1;
-}
+/* Exported from bionic */
+extern void malloc_disable();
+extern void malloc_enable();
+extern int malloc_iterate(uintptr_t base, size_t size,
+    void (*callback)(uintptr_t base, size_t size, void* arg), void* arg);
+extern ssize_t malloc_backtrace(void* pointer, uintptr_t* frames, size_t frame_count);
+
+__END_DECLS
+
+#endif // LIBMEMUNREACHABLE_BIONIC_H_

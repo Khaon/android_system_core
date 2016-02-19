@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 The Android Open Source Project
+ * Copyright (C) 2016 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,16 +14,23 @@
  * limitations under the License.
  */
 
-#include <healthd/healthd.h>
+#ifndef LIBMEMUNREACHABLE_PROCESS_MAPPING_H_
+#define LIBMEMUNREACHABLE_PROCESS_MAPPING_H_
 
-void healthd_board_init(struct healthd_config*)
-{
-    // use defaults
-}
+#include "Allocator.h"
 
+struct Mapping {
+  uintptr_t begin;
+  uintptr_t end;
+  bool read;
+  bool write;
+  bool execute;
+  bool priv;
+  char name[96];
+};
 
-int healthd_board_battery_update(struct android::BatteryProperties*)
-{
-    // return 0 to log periodic polled battery status to kernel log
-    return 1;
-}
+// This function is not re-entrant since it uses a static buffer for
+// the line data.
+bool ProcessMappings(pid_t pid, allocator::vector<Mapping>& mappings);
+
+#endif // LIBMEMUNREACHABLE_PROCESS_MAPPING_H_

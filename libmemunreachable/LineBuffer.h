@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 The Android Open Source Project
+ * Copyright (C) 2015 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,16 +14,23 @@
  * limitations under the License.
  */
 
-#include <healthd/healthd.h>
+#ifndef _LIBMEMUNREACHABLE_LINE_BUFFER_H
+#define _LIBMEMUNREACHABLE_LINE_BUFFER_H
 
-void healthd_board_init(struct healthd_config*)
-{
-    // use defaults
-}
+#include <stdint.h>
 
+class LineBuffer {
+ public:
+  LineBuffer(int fd, char* buffer, size_t buffer_len);
 
-int healthd_board_battery_update(struct android::BatteryProperties*)
-{
-    // return 0 to log periodic polled battery status to kernel log
-    return 1;
-}
+  bool GetLine(char** line, size_t* line_len);
+
+ private:
+  int fd_;
+  char* buffer_ = nullptr;
+  size_t buffer_len_ = 0;
+  size_t start_ = 0;
+  size_t bytes_ = 0;
+};
+
+#endif // _LIBMEMUNREACHABLE_LINE_BUFFER_H
