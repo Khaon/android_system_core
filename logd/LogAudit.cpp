@@ -99,11 +99,20 @@ std::string LogAudit::getProperty(const std::string& name)
 }
 
 void LogAudit::enforceIntegrity() {
+    static bool loggedOnce;
+    bool once = loggedOnce;
+
+    loggedOnce = true;
+
     if (!AUDITD_ENFORCE_INTEGRITY) {
-        logToDmesg("integrity enforcement suppressed; not rebooting");
+        if (!once) {
+            logToDmesg("integrity enforcement suppressed; not rebooting");
+        }
     } else if (rebootToSafeMode) {
         if (getProperty("persist.sys.safemode") == "1") {
-            logToDmesg("integrity enforcement suppressed; in safe mode");
+            if (!once) {
+                logToDmesg("integrity enforcement suppressed; in safe mode");
+            }
             return;
         }
 
@@ -155,6 +164,10 @@ int LogAudit::logPrint(const char *fmt, ...) {
         }
     }
 
+    // Note: The audit log can include untrusted strings, but those containing
+    // "a control character, unprintable character, double quote mark, or a
+    // space" are hex encoded. The space character before the search term is
+    // therefore needed to prevent denial of service. Do not remove the space.
     bool permissive = strstr(str, " enforcing=0") ||
                       strstr(str, " permissive=1");
 
