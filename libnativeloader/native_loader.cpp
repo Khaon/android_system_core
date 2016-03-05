@@ -21,6 +21,7 @@
 #ifdef __ANDROID__
 #include <android/dlext.h>
 #include "cutils/properties.h"
+#include "log/log.h"
 #endif
 
 #include <algorithm>
@@ -59,10 +60,11 @@ class LibraryNamespaces {
  public:
   LibraryNamespaces() : initialized_(false) { }
 
-  android_namespace_t* GetOrCreate(JNIEnv* env, jobject class_loader,
-                                   bool is_shared,
-                                   jstring java_library_path,
-                                   jstring java_permitted_path) {
+  android_namespace_t* Create(JNIEnv* env,
+                              jobject class_loader,
+                              bool is_shared,
+                              jstring java_library_path,
+                              jstring java_permitted_path) {
     ScopedUtfChars library_path(env, java_library_path);
 
     std::string permitted_path;
@@ -75,13 +77,9 @@ class LibraryNamespaces {
       return nullptr;
     }
 
-    std::lock_guard<std::mutex> guard(mutex_);
-
     android_namespace_t* ns = FindNamespaceByClassLoader(env, class_loader);
 
-    if (ns != nullptr) {
-      return ns;
-    }
+    LOG_FATAL_IF(ns != nullptr, "There is already a namespace associated with this classloader");
 
     uint64_t namespace_type = ANDROID_NAMESPACE_TYPE_ISOLATED;
     if (is_shared) {
@@ -96,7 +94,9 @@ class LibraryNamespaces {
                                       permitted_path.c_str() :
                                       nullptr);
 
-    namespaces_.push_back(std::make_pair(env->NewWeakGlobalRef(class_loader), ns));
+    if (ns != nullptr) {
+      namespaces_.push_back(std::make_pair(env->NewWeakGlobalRef(class_loader), ns));
+    }
 
     return ns;
   }
@@ -128,36 +128,74 @@ class LibraryNamespaces {
   }
 
   bool initialized_;
-  std::mutex mutex_;
   std::vector<std::pair<jweak, android_namespace_t*>> namespaces_;
 
   DISALLOW_COPY_AND_ASSIGN(LibraryNamespaces);
 };
 
+static std::mutex g_namespaces_mutex;
 static LibraryNamespaces* g_namespaces = new LibraryNamespaces;
+
+static bool namespaces_enabled(uint32_t target_sdk_version) {
+  return target_sdk_version > 0;
+}
 #endif
 
 void PreloadPublicNativeLibraries() {
 #if defined(__ANDROID__)
+  std::lock_guard<std::mutex> guard(g_namespaces_mutex);
   g_namespaces->PreloadPublicLibraries();
 #endif
 }
 
 
-void* OpenNativeLibrary(JNIEnv* env, int32_t target_sdk_version, const char* path,
-                        jobject class_loader, bool is_shared, jstring java_library_path,
-                        jstring java_permitted_path) {
+jstring CreateClassLoaderNamespace(JNIEnv* env,
+                                   int32_t target_sdk_version,
+                                   jobject class_loader,
+                                   bool is_shared,
+                                   jstring library_path,
+                                   jstring permitted_path) {
 #if defined(__ANDROID__)
-  if (target_sdk_version == 0 || class_loader == nullptr) {
+  if (!namespaces_enabled(target_sdk_version)) {
+    return nullptr;
+  }
+
+  std::lock_guard<std::mutex> guard(g_namespaces_mutex);
+  android_namespace_t* ns = g_namespaces->Create(env,
+                                                 class_loader,
+                                                 is_shared,
+                                                 library_path,
+                                                 permitted_path);
+  if (ns == nullptr) {
+    return env->NewStringUTF(dlerror());
+  }
+#else
+  UNUSED(env, target_sdk_version, class_loader, is_shared,
+         library_path, permitted_path);
+#endif
+  return nullptr;
+}
+
+void* OpenNativeLibrary(JNIEnv* env,
+                        int32_t target_sdk_version,
+                        const char* path,
+                        jobject class_loader,
+                        jstring library_path) {
+#if defined(__ANDROID__)
+  if (!namespaces_enabled(target_sdk_version) || class_loader == nullptr) {
     return dlopen(path, RTLD_NOW);
   }
 
-  android_namespace_t* ns =
-      g_namespaces->GetOrCreate(env, class_loader, is_shared,
-                                java_library_path, java_permitted_path);
+  std::lock_guard<std::mutex> guard(g_namespaces_mutex);
+  android_namespace_t* ns = g_namespaces->FindNamespaceByClassLoader(env, class_loader);
 
   if (ns == nullptr) {
-    return nullptr;
+    // This is the case where the classloader was not created by ApplicationLoaders
+    // In this case we create an isolated not-shared namespace for it.
+    ns = g_namespaces->Create(env, class_loader, false, library_path, nullptr);
+    if (ns == nullptr) {
+      return nullptr;
+    }
   }
 
   android_dlextinfo extinfo;
@@ -166,14 +204,14 @@ void* OpenNativeLibrary(JNIEnv* env, int32_t target_sdk_version, const char* pat
 
   return android_dlopen_ext(path, RTLD_NOW, &extinfo);
 #else
-  UNUSED(env, target_sdk_version, class_loader, is_shared,
-         java_library_path, java_permitted_path);
+  UNUSED(env, target_sdk_version, class_loader, library_path);
   return dlopen(path, RTLD_NOW);
 #endif
 }
 
 #if defined(__ANDROID__)
 android_namespace_t* FindNamespaceByClassLoader(JNIEnv* env, jobject class_loader) {
+  std::lock_guard<std::mutex> guard(g_namespaces_mutex);
   return g_namespaces->FindNamespaceByClassLoader(env, class_loader);
 }
 #endif
