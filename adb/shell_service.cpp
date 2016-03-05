@@ -135,37 +135,6 @@ std::string ReadAll(int fd) {
     return received;
 }
 
-// Helper to automatically close an FD when it goes out of scope.
-class ScopedFd {
-  public:
-    ScopedFd() {}
-    ~ScopedFd() { Reset(); }
-
-    void Reset(int fd=-1) {
-        if (fd != fd_) {
-            if (valid()) {
-                adb_close(fd_);
-            }
-            fd_ = fd;
-        }
-    }
-
-    int Release() {
-        int temp = fd_;
-        fd_ = -1;
-        return temp;
-    }
-
-    bool valid() const { return fd_ >= 0; }
-
-    int fd() const { return fd_; }
-
-  private:
-    int fd_ = -1;
-
-    DISALLOW_COPY_AND_ASSIGN(ScopedFd);
-};
-
 // Creates a socketpair and saves the endpoints to |fd1| and |fd2|.
 bool CreateSocketpair(ScopedFd* fd1, ScopedFd* fd2) {
     int sockets[2];
@@ -315,7 +284,9 @@ bool Subprocess::ForkAndExec(std::string* error) {
     if (type_ == SubprocessType::kPty) {
         int fd;
         pid_ = forkpty(&fd, pts_name, nullptr, nullptr);
-        stdinout_sfd_.Reset(fd);
+        if (pid_ > 0) {
+          stdinout_sfd_.Reset(fd);
+        }
     } else {
         if (!CreateSocketpair(&stdinout_sfd_, &child_stdinout_sfd)) {
             *error = android::base::StringPrintf("failed to create socketpair for stdin/out: %s",
