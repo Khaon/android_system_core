@@ -18,6 +18,8 @@
 #define LIBMEMUNREACHABLE_BIONIC_H_
 
 #include <sys/cdefs.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 __BEGIN_DECLS
 

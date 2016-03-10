@@ -20,6 +20,7 @@
 
 #include <getopt.h>
 #include <unistd.h>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <ctime>
@@ -134,6 +135,30 @@ const std::map<std::string, int32_t> kBootReasonMap = {
   {"Reboot", 18},
   {"rtc", 19},
   {"edl", 20},
+  {"oem_pon1", 21},
+  {"oem_powerkey", 22},
+  {"oem_unknown_reset", 23},
+  {"srto: HWWDT reset SC", 24},
+  {"srto: HWWDT reset platform", 25},
+  {"srto: bootloader", 26},
+  {"srto: kernel panic", 27},
+  {"srto: kernel watchdog reset", 28},
+  {"srto: normal", 29},
+  {"srto: reboot", 30},
+  {"srto: reboot-bootloader", 31},
+  {"srto: security watchdog reset", 32},
+  {"srto: wakesrc", 33},
+  {"srto: watchdog", 34},
+  {"srto:1-1", 35},
+  {"srto:omap_hsmm", 36},
+  {"srto:phy0", 37},
+  {"srto:rtc0", 38},
+  {"srto:touchpad", 39},
+  {"watchdog", 40},
+  {"watchdogr", 41},
+  {"wdog_bark", 42},
+  {"wdog_bite", 43},
+  {"wdog_reset", 44},
 };
 
 // Converts a string value representing the reason the system booted to an
@@ -166,6 +191,15 @@ void RecordFactoryReset() {
 
   time_t current_time_utc = time(nullptr);
 
+  static const char* factory_reset_current_time = "factory_reset_current_time";
+  if (current_time_utc < 0) {
+    // UMA does not display negative values in buckets, so convert to positive.
+    LogBootEvent(factory_reset_current_time, std::abs(current_time_utc));
+    return;
+  } else {
+    LogBootEvent(factory_reset_current_time, current_time_utc);
+  }
+
   // The factory_reset boot event does not exist after the device is reset, so
   // use this signal to mark the time of the factory reset.
   if (!boot_event_store.GetBootEvent("factory_reset", &record)) {
@@ -179,6 +213,7 @@ void RecordFactoryReset() {
   // Calculate and record the difference in time between now and the
   // factory_reset time.
   time_t factory_reset_utc = record.second;
+  LogBootEvent("factory_reset_record_value", factory_reset_utc);
   time_t time_since_factory_reset = difftime(current_time_utc,
                                              factory_reset_utc);
   boot_event_store.AddBootEventWithValue("time_since_factory_reset",
