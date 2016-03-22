@@ -74,7 +74,7 @@ static int property_triggers_enabled = 0;
 
 static char qemu[32];
 
-std::vector<std::string> console_names;
+std::string default_console = "/dev/console";
 static time_t process_needs_restart;
 
 const char *ENV[32];
@@ -297,22 +297,9 @@ static int keychord_init_action(const std::vector<std::string>& args)
 
 static int console_init_action(const std::vector<std::string>& args)
 {
-    std::vector<std::string> consoles;
-    std::string c_prop = property_get("ro.boot.console");
-    if (c_prop.empty()) {
-        // Property is missing, so check the system console by default.
-        consoles.emplace_back(DEFAULT_CONSOLE);
-    } else {
-        consoles = android::base::Split(c_prop, ":");
-    }
-
-    for (const auto& c : consoles) {
-        std::string console = "/dev/" + c;
-        int fd = open(console.c_str(), O_RDWR | O_CLOEXEC);
-        if (fd != -1) {
-            console_names.emplace_back(c);
-            close(fd);
-        }
+    std::string console = property_get("ro.boot.console");
+    if (!console.empty()) {
+        default_console = "/dev/" + console;
     }
     return 0;
 }

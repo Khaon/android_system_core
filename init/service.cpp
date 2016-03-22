@@ -172,7 +172,7 @@ bool Service::HandleClass(const std::vector<std::string>& args, std::string* err
 
 bool Service::HandleConsole(const std::vector<std::string>& args, std::string* err) {
     flags_ |= SVC_CONSOLE;
-    console_ = args.size() > 1 ? args[1] : DEFAULT_CONSOLE;
+    console_ = args.size() > 1 ? "/dev/" + args[1] : "";
     return true;
 }
 
@@ -330,10 +330,18 @@ bool Service::Start(const std::vector<std::string>& dynamic_args) {
     }
 
     bool needs_console = (flags_ & SVC_CONSOLE);
-    if (needs_console && console_names.empty()) {
-        ERROR("service '%s' requires console\n", name_.c_str());
-        flags_ |= SVC_DISABLED;
-        return false;
+    if (needs_console) {
+        if (console_.empty()) {
+            console_ = default_console;
+        }
+
+        bool have_console = (open(console_.c_str(), O_RDWR | O_CLOEXEC) != -1);
+        if (!have_console) {
+            ERROR("service '%s' couldn't open console '%s': %s\n",
+                  name_.c_str(), console_.c_str(), strerror(errno));
+            flags_ |= SVC_DISABLED;
+            return false;
+        }
     }
 
     struct stat sb;
@@ -607,11 +615,7 @@ void Service::ZapStdio() const {
 }
 
 void Service::OpenConsole() const {
-    int fd = -1;
-    if (std::find(console_names.begin(), console_names.end(), console_) != console_names.end()) {
-        std::string c_path = "/dev/" + console_;
-        fd = open(c_path.c_str(), O_RDWR);
-    }
+    int fd = open(console_.c_str(), O_RDWR);
     if (fd == -1) fd = open("/dev/null", O_RDWR);
     ioctl(fd, TIOCSCTTY, 0);
     dup2(fd, 0);
