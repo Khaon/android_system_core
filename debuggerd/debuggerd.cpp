@@ -36,10 +36,10 @@
 
 #include <log/logger.h>
 
+#include <android-base/unique_fd.h>
 #include <cutils/debugger.h>
 #include <cutils/properties.h>
 #include <cutils/sockets.h>
-#include <nativehelper/ScopedFd.h>
 
 #include <linux/input.h>
 
@@ -580,15 +580,24 @@ static void monitor_worker_process(int child_pid, const debugger_request_t& requ
   siginfo_t siginfo;
   int signal = TEMP_FAILURE_RETRY(sigtimedwait(&signal_set, &siginfo, &timeout));
   if (signal == SIGCHLD) {
-    pid_t rc = waitpid(0, &status, WNOHANG | WUNTRACED);
+    pid_t rc = waitpid(-1, &status, WNOHANG | WUNTRACED);
     if (rc != child_pid) {
       ALOGE("debuggerd: waitpid returned unexpected pid (%d), committing murder-suicide", rc);
+
+      if (WIFEXITED(status)) {
+        ALOGW("debuggerd: pid %d exited with status %d", rc, WEXITSTATUS(status));
+      } else if (WIFSIGNALED(status)) {
+        ALOGW("debuggerd: pid %d received signal %d", rc, WTERMSIG(status));
+      } else if (WIFSTOPPED(status)) {
+        ALOGW("debuggerd: pid %d stopped by signal %d", rc, WSTOPSIG(status));
+      } else if (WIFCONTINUED(status)) {
+        ALOGW("debuggerd: pid %d continued", rc);
+      }
+
       kill_worker = true;
       kill_target = true;
       kill_self = true;
-    }
-
-    if (WIFSIGNALED(status)) {
+    } else if (WIFSIGNALED(status)) {
       ALOGE("debuggerd: worker process %d terminated due to signal %d", child_pid, WTERMSIG(status));
       kill_worker = false;
       kill_target = true;
@@ -612,15 +621,16 @@ static void monitor_worker_process(int child_pid, const debugger_request_t& requ
     }
   }
 
-  if (kill_target) {
-    // Resume or kill the target, depending on what the initial request was.
-    if (request.action == DEBUGGER_ACTION_CRASH) {
-      ALOGE("debuggerd: killing target %d", request.pid);
-      kill(request.pid, SIGKILL);
-    } else {
-      ALOGE("debuggerd: resuming target %d", request.pid);
-      kill(request.pid, SIGCONT);
-    }
+  int exit_signal = SIGCONT;
+  if (kill_target && request.action == DEBUGGER_ACTION_CRASH) {
+    ALOGE("debuggerd: killing target %d", request.pid);
+    exit_signal = SIGKILL;
+  } else {
+    ALOGW("debuggerd: resuming target %d", request.pid);
+  }
+
+  if (kill(request.pid, exit_signal) != 0) {
+    ALOGE("debuggerd: failed to send signal %d to target: %s", exit_signal, strerror(errno));
   }
 
   if (kill_self) {
@@ -632,7 +642,7 @@ static void monitor_worker_process(int child_pid, const debugger_request_t& requ
 static void handle_request(int fd) {
   ALOGV("handle_request(%d)\n", fd);
 
-  ScopedFd closer(fd);
+  android::base::unique_fd closer(fd);
   debugger_request_t request;
   memset(&request, 0, sizeof(request));
   int status = read_request(fd, &request);
