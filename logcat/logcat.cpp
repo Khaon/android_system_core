@@ -69,20 +69,22 @@ namespace android {
 
 /* Global Variables */
 
-static const char * g_outputFileName = NULL;
+static const char * g_outputFileName;
 // 0 means "no log rotation"
-static size_t g_logRotateSizeKBytes = 0;
+static size_t g_logRotateSizeKBytes;
 // 0 means "unbounded"
 static size_t g_maxRotatedLogs = DEFAULT_MAX_ROTATED_LOGS;
 static int g_outFD = -1;
-static size_t g_outByteCount = 0;
-static int g_printBinary = 0;
-static int g_devCount = 0;                              // >1 means multiple
+static size_t g_outByteCount;
+static int g_printBinary;
+static int g_devCount;                              // >1 means multiple
 static pcrecpp::RE* g_regex;
 // 0 means "infinite"
-static size_t g_maxCount = 0;
-static size_t g_printCount = 0;
+static size_t g_maxCount;
+static size_t g_printCount;
+static bool g_printItAnyways;
 
+// if showHelp is set, newline required in fmt statement to transition to usage
 __noreturn static void logcat_panic(bool showHelp, const char *fmt, ...) __printflike(2,3);
 
 static int openLogFile (const char *pathname)
@@ -149,14 +151,10 @@ void printBinary(struct log_msg *buf)
     TEMP_FAILURE_RETRY(write(g_outFD, buf, size));
 }
 
-static bool regexOk(const AndroidLogEntry& entry, log_id_t id)
+static bool regexOk(const AndroidLogEntry& entry)
 {
-    if (! g_regex) {
+    if (!g_regex) {
         return true;
-    }
-
-    if (id == LOG_ID_EVENTS || id == LOG_ID_SECURITY) {
-        return false;
     }
 
     std::string messageString(entry.message, entry.messageLen);
@@ -192,14 +190,16 @@ static void processBuffer(log_device_t* dev, struct log_msg *buf)
         goto error;
     }
 
-    if (android_log_shouldPrintLine(g_logformat, entry.tag, entry.priority) &&
-        regexOk(entry, buf->id())) {
-        bytesWritten = android_log_printLogLine(g_logformat, g_outFD, &entry);
+    if (android_log_shouldPrintLine(g_logformat, entry.tag, entry.priority)) {
+        bool match = regexOk(entry);
 
-        g_printCount++;
+        g_printCount += match;
+        if (match || g_printItAnyways) {
+            bytesWritten = android_log_printLogLine(g_logformat, g_outFD, &entry);
 
-        if (bytesWritten < 0) {
-            logcat_panic(false, "output error");
+            if (bytesWritten < 0) {
+                logcat_panic(false, "output error");
+            }
         }
     }
 
@@ -283,9 +283,9 @@ static void show_help(const char *cmd)
                     "  -f <filename>   Log to file. Default is stdout\n"
                     "  --file=<filename>\n"
                     "  -r <kbytes>     Rotate log every kbytes. Requires -f\n"
-                    "  --rotate_kbytes=<kbytes>\n"
+                    "  --rotate-kbytes=<kbytes>\n"
                     "  -n <count>      Sets max number of rotated logs to <count>, default 4\n"
-                    "  --rotate_count=<count>\n"
+                    "  --rotate-count=<count>\n"
                     "  -v <format>     Sets the log print format, where <format> is:\n"
                     "  --format=<format>\n"
                     "                      brief color epoch long monotonic printable process raw\n"
@@ -299,6 +299,8 @@ static void show_help(const char *cmd)
                     "  --regex <expr>  where <expr> is a regular expression\n"
                     "  -m <count>      quit after printing <count> lines. This is meant to be\n"
                     "  --max-count=<count> paired with --regex, but will work on its own.\n"
+                    "  --print         paired with --regex and --max-count to let content bypass\n"
+                    "                  regex filter but still stop at number of matches.\n"
                     "  -t <count>      print only the most recent <count> lines (implies -d)\n"
                     "  -t '<time>'     print most recent lines since specified time (implies -d)\n"
                     "  -T <count>      print only the most recent <count> lines (does not imply -d)\n"
@@ -306,9 +308,9 @@ static void show_help(const char *cmd)
                     "                  count is pure numerical, time is 'MM-DD hh:mm:ss.mmm...'\n"
                     "                  'YYYY-MM-DD hh:mm:ss.mmm...' or 'sssss.mmm...' format\n"
                     "  -g              get the size of the log's ring buffer and exit\n"
-                    "  --buffer_size\n"
+                    "  --buffer-size\n"
                     "  -G <size>       set size of log ring buffer, may suffix with K or M.\n"
-                    "  --buffer_size=<size>\n"
+                    "  --buffer-size=<size>\n"
                     "  -L              dump logs from prior to last reboot\n"
                     "  --last\n"
                     // Leave security (Device Owner only installations) and
@@ -564,24 +566,31 @@ int main(int argc, char **argv)
     for (;;) {
         int ret;
         int option_index = 0;
+        // list of long-argument only strings for later comparison
         static const char pid_str[] = "pid";
         static const char wrap_str[] = "wrap";
+        static const char print_str[] = "print";
         static const struct option long_options[] = {
           { "binary",        no_argument,       NULL,   'B' },
           { "buffer",        required_argument, NULL,   'b' },
-          { "buffer_size",   optional_argument, NULL,   'g' },
+          { "buffer-size",   optional_argument, NULL,   'g' },
           { "clear",         no_argument,       NULL,   'c' },
           { "dividers",      no_argument,       NULL,   'D' },
           { "file",          required_argument, NULL,   'f' },
           { "format",        required_argument, NULL,   'v' },
+          // hidden and undocumented reserved alias for --max-count
+          { "head",          required_argument, NULL,   'm' },
           { "last",          no_argument,       NULL,   'L' },
           { pid_str,         required_argument, NULL,   0 },
           { "max-count",     required_argument, NULL,   'm' },
+          { print_str,       no_argument,       NULL,   0 },
           { "prune",         optional_argument, NULL,   'p' },
           { "regex",         required_argument, NULL,   'e' },
-          { "rotate_count",  required_argument, NULL,   'n' },
-          { "rotate_kbytes", required_argument, NULL,   'r' },
+          { "rotate-count",  required_argument, NULL,   'n' },
+          { "rotate-kbytes", required_argument, NULL,   'r' },
           { "statistics",    no_argument,       NULL,   'S' },
+          // hidden and undocumented reserved alias for -t
+          { "tail",          required_argument, NULL,   't' },
           // support, but ignore and do not document, the optional argument
           { wrap_str,        optional_argument, NULL,   0 },
           { NULL,            0,                 NULL,   0 }
@@ -621,6 +630,10 @@ int main(int argc, char **argv)
                                 long_options[option_index].name,
                                 ANDROID_LOG_WRAP_DEFAULT_TIMEOUT, dummy);
                     }
+                    break;
+                }
+                if (long_options[option_index].name == print_str) {
+                    g_printItAnyways = true;
                     break;
                 }
             break;
@@ -970,7 +983,16 @@ int main(int argc, char **argv)
     }
 
     if (g_maxCount && got_t) {
-        logcat_panic(true, "Cannot use -m (--max-count) and -t together");
+        logcat_panic(true, "Cannot use -m (--max-count) and -t together\n");
+    }
+    if (g_printItAnyways && (!g_regex || !g_maxCount)) {
+        // One day it would be nice if --print -v color and --regex <expr>
+        // could play with each other and show regex highlighted content.
+        fprintf(stderr, "WARNING: "
+                            "--print ignored, to be used in combination with\n"
+                        "         "
+                            "--regex <expr> and --max-count <N>\n");
+        g_printItAnyways = false;
     }
 
     if (!devices) {
@@ -1189,7 +1211,7 @@ int main(int argc, char **argv)
     dev = NULL;
     log_device_t unexpected("unexpected", false);
 
-    while (!g_maxCount || g_printCount < g_maxCount) {
+    while (!g_maxCount || (g_printCount < g_maxCount)) {
         struct log_msg log_msg;
         log_device_t* d;
         int ret = android_logger_list_read(logger_list, &log_msg);
