@@ -25,10 +25,13 @@
 
 #include <memory>
 
+#include <cutils/properties.h>
 #include <gtest/gtest.h>
 #include <log/log.h>
 #include <log/logger.h>
 #include <log/log_read.h>
+
+#define BIG_BUFFER (5 * 1024)
 
 // enhanced version of LOG_FAILURE_RETRY to add support for EAGAIN and
 // non-syscall libs. Since we are only using this in the emergency of
@@ -54,7 +57,7 @@ TEST(logcat, buckets) {
       "logcat -b radio -b events -b system -b main -d 2>/dev/null",
       "r")));
 
-    char buffer[5120];
+    char buffer[BIG_BUFFER];
 
     int ids = 0;
     int count = 0;
@@ -102,7 +105,7 @@ TEST(logcat, year) {
       "logcat -v long -v year -b all -t 3 2>/dev/null",
       "r")));
 
-    char buffer[5120];
+    char buffer[BIG_BUFFER];
 
     int count = 0;
 
@@ -155,23 +158,29 @@ TEST(logcat, tz) {
         return;
     }
 
-    FILE *fp;
+    int tries = 3; // in case run too soon after system start or buffer clear
+    int count;
 
-    ASSERT_TRUE(NULL != (fp = popen(
-      "logcat -v long -v America/Los_Angeles -b all -t 3 2>/dev/null",
-      "r")));
+    do {
+        FILE *fp;
 
-    char buffer[5120];
+        ASSERT_TRUE(NULL != (fp = popen(
+          "logcat -v long -v America/Los_Angeles -b all -t 3 2>/dev/null",
+          "r")));
 
-    int count = 0;
+        char buffer[BIG_BUFFER];
 
-    while (fgetLongTime(buffer, sizeof(buffer), fp)) {
-        if (strstr(buffer, " -0700") || strstr(buffer, " -0800")) {
-            ++count;
+        count = 0;
+
+        while (fgetLongTime(buffer, sizeof(buffer), fp)) {
+            if (strstr(buffer, " -0700") || strstr(buffer, " -0800")) {
+                ++count;
+            }
         }
-    }
 
-    pclose(fp);
+        pclose(fp);
+
+    } while ((count < 3) && --tries && (sleep(1), true));
 
     ASSERT_EQ(3, count);
 }
@@ -183,7 +192,7 @@ TEST(logcat, ntz) {
       "logcat -v long -v America/Los_Angeles -v zone -b all -t 3 2>/dev/null",
       "r")));
 
-    char buffer[5120];
+    char buffer[BIG_BUFFER];
 
     int count = 0;
 
@@ -198,84 +207,47 @@ TEST(logcat, ntz) {
     ASSERT_EQ(0, count);
 }
 
+void do_tail(int num) {
+    int tries = 3; // in case run too soon after system start or buffer clear
+    int count;
+
+    do {
+        char buffer[BIG_BUFFER];
+
+        snprintf(buffer, sizeof(buffer),
+          "logcat -v long -b radio -b events -b system -b main -t %d 2>/dev/null",
+          num);
+
+        FILE *fp;
+        ASSERT_TRUE(NULL != (fp = popen(buffer, "r")));
+
+        count = 0;
+
+        while (fgetLongTime(buffer, sizeof(buffer), fp)) {
+            ++count;
+        }
+
+        pclose(fp);
+
+    } while ((count < num) && --tries && (sleep(1), true));
+
+    ASSERT_EQ(num, count);
+}
+
 TEST(logcat, tail_3) {
-    FILE *fp;
-
-    ASSERT_TRUE(NULL != (fp = popen(
-      "logcat -v long -b radio -b events -b system -b main -t 3 2>/dev/null",
-      "r")));
-
-    char buffer[5120];
-
-    int count = 0;
-
-    while (fgetLongTime(buffer, sizeof(buffer), fp)) {
-        ++count;
-    }
-
-    pclose(fp);
-
-    ASSERT_EQ(3, count);
+    do_tail(3);
 }
 
 TEST(logcat, tail_10) {
-    FILE *fp;
-
-    ASSERT_TRUE(NULL != (fp = popen(
-      "logcat -v long -b radio -b events -b system -b main -t 10 2>/dev/null",
-      "r")));
-
-    char buffer[5120];
-
-    int count = 0;
-
-    while (fgetLongTime(buffer, sizeof(buffer), fp)) {
-        ++count;
-    }
-
-    pclose(fp);
-
-    ASSERT_EQ(10, count);
+    do_tail(10);
 }
 
 TEST(logcat, tail_100) {
-    FILE *fp;
-
-    ASSERT_TRUE(NULL != (fp = popen(
-      "logcat -v long -b radio -b events -b system -b main -t 100 2>/dev/null",
-      "r")));
-
-    char buffer[5120];
-
-    int count = 0;
-
-    while (fgetLongTime(buffer, sizeof(buffer), fp)) {
-        ++count;
-    }
-
-    pclose(fp);
-
-    ASSERT_EQ(100, count);
+    do_tail(100);
 }
 
 TEST(logcat, tail_1000) {
-    FILE *fp;
-
-    ASSERT_TRUE(NULL != (fp = popen(
-      "logcat -v long -b radio -b events -b system -b main -t 1000 2>/dev/null",
-      "r")));
-
-    char buffer[5120];
-
-    int count = 0;
-
-    while (fgetLongTime(buffer, sizeof(buffer), fp)) {
-        ++count;
-    }
-
-    pclose(fp);
-
-    ASSERT_EQ(1000, count);
+    do_tail(1000);
 }
 
 TEST(logcat, tail_time) {
@@ -283,7 +255,7 @@ TEST(logcat, tail_time) {
 
     ASSERT_TRUE(NULL != (fp = popen("logcat -v long -b all -t 10 2>&1", "r")));
 
-    char buffer[5120];
+    char buffer[BIG_BUFFER];
     char *last_timestamp = NULL;
     char *first_timestamp = NULL;
     int count = 0;
@@ -346,7 +318,7 @@ TEST(logcat, End_to_End) {
       "logcat -v brief -b events -t 100 2>/dev/null",
       "r")));
 
-    char buffer[5120];
+    char buffer[BIG_BUFFER];
 
     int count = 0;
 
@@ -370,15 +342,17 @@ TEST(logcat, End_to_End) {
     ASSERT_EQ(1, count);
 }
 
-TEST(logcat, get_size) {
+int get_groups(const char *cmd) {
     FILE *fp;
 
     // NB: crash log only available in user space
-    ASSERT_TRUE(NULL != (fp = popen(
-      "logcat -v brief -b radio -b events -b system -b main -g 2>/dev/null",
-      "r")));
+    EXPECT_TRUE(NULL != (fp = popen(cmd, "r")));
 
-    char buffer[5120];
+    if (fp == NULL) {
+        return 0;
+    }
+
+    char buffer[BIG_BUFFER];
 
     int count = 0;
 
@@ -438,7 +412,31 @@ TEST(logcat, get_size) {
 
     pclose(fp);
 
-    ASSERT_EQ(4, count);
+    return count;
+}
+
+TEST(logcat, get_size) {
+    ASSERT_EQ(4, get_groups(
+      "logcat -v brief -b radio -b events -b system -b main -g 2>/dev/null"));
+}
+
+// duplicate test for get_size, but use comma-separated list of buffers
+TEST(logcat, multiple_buffer) {
+    ASSERT_EQ(4, get_groups(
+      "logcat -v brief -b radio,events,system,main -g 2>/dev/null"));
+}
+
+// duplicate test for get_size, but use test.logcat.buffer property
+TEST(logcat, property_expand) {
+    property_set("test.logcat.buffer", "radio,events");
+    EXPECT_EQ(4, get_groups(
+      "logcat -v brief -b 'system,${test.logcat.buffer:-bogo},main' -g 2>/dev/null"));
+    property_set("test.logcat.buffer", "");
+}
+
+TEST(logcat, bad_buffer) {
+    ASSERT_EQ(0, get_groups(
+      "logcat -v brief -b radio,events,bogo,system,main -g 2>/dev/null"));
 }
 
 static void caught_blocking(int /*signum*/)
@@ -467,7 +465,7 @@ TEST(logcat, blocking) {
       " logcat -v brief -b events 2>&1",
       "r")));
 
-    char buffer[5120];
+    char buffer[BIG_BUFFER];
 
     int count = 0;
 
@@ -536,7 +534,7 @@ TEST(logcat, blocking_tail) {
       " logcat -v brief -b events -T 5 2>&1",
       "r")));
 
-    char buffer[5120];
+    char buffer[BIG_BUFFER];
 
     int count = 0;
 
@@ -599,7 +597,7 @@ TEST(logcat, logrotate) {
         FILE *fp;
         EXPECT_TRUE(NULL != (fp = popen(command, "r")));
         if (fp) {
-            char buffer[5120];
+            char buffer[BIG_BUFFER];
             int count = 0;
 
             while (fgets(buffer, sizeof(buffer), fp)) {
@@ -642,7 +640,7 @@ TEST(logcat, logrotate_suffix) {
 
         FILE *fp;
         EXPECT_TRUE(NULL != (fp = popen(command, "r")));
-        char buffer[5120];
+        char buffer[BIG_BUFFER];
         int log_file_count = 0;
 
         while (fgets(buffer, sizeof(buffer), fp)) {
@@ -815,7 +813,7 @@ TEST(logcat, blocking_clear) {
       " logcat -v brief -b events 2>&1",
       "r")));
 
-    char buffer[5120];
+    char buffer[BIG_BUFFER];
 
     int count = 0;
 
@@ -876,7 +874,7 @@ static bool get_white_black(char **list) {
         return false;
     }
 
-    char buffer[5120];
+    char buffer[BIG_BUFFER];
 
     while (fgets(buffer, sizeof(buffer), fp)) {
         char *hold = *list;
@@ -905,7 +903,7 @@ static bool get_white_black(char **list) {
 static bool set_white_black(const char *list) {
     FILE *fp;
 
-    char buffer[5120];
+    char buffer[BIG_BUFFER];
 
     snprintf(buffer, sizeof(buffer), "logcat -P '%s' 2>&1", list ? list : "");
     fp = popen(buffer, "r");
@@ -967,7 +965,7 @@ TEST(logcat, regex) {
     FILE *fp;
     int count = 0;
 
-    char buffer[5120];
+    char buffer[BIG_BUFFER];
 
     snprintf(buffer, sizeof(buffer), "logcat --pid %d -d -e logcat_test_a+b", getpid());
 
@@ -1000,7 +998,7 @@ TEST(logcat, maxcount) {
     FILE *fp;
     int count = 0;
 
-    char buffer[5120];
+    char buffer[BIG_BUFFER];
 
     snprintf(buffer, sizeof(buffer), "logcat --pid %d -d --max-count 3", getpid());
 
