@@ -327,15 +327,9 @@ static void show_help(const char *cmd)
                     "                  other pruning activity is oldest first. Special case ~!\n"
                     "                  represents an automatic quicker pruning for the noisiest\n"
                     "                  UID as determined by the current statistics.\n"
-<<<<<<< HEAD
-                    "  -C              colored output\n"
-                    "  -P '<list> ...' set prune white and ~black list, using same format as\n"
-                    "  --prune='<list> ...'  printed above. Must be quoted.\n"
-=======
                     "  -P '<list> ...', --prune='<list> ...'\n"
                     "                  Set prune white and ~black list, using same format as\n"
                     "                  listed above. Must be quoted.\n"
->>>>>>> aosp/master
                     "  --pid=<pid>     Only prints logs from the given pid.\n"
                     // Check ANDROID_LOG_WRAP_DEFAULT_TIMEOUT value for match to 2 hours
                     "  --wrap          Sleep for 2 hours or when buffer about to wrap whichever\n"
