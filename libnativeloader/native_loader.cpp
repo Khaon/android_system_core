@@ -36,7 +36,7 @@
 namespace android {
 
 #if defined(__ANDROID__)
-static constexpr const char* kPublicNativeLibrariesSystemConfig = "/system/etc/public.libraries.txt";
+static constexpr const char* kPublicNativeLibrariesSystemConfigPathFromRoot = "/etc/public.libraries.txt";
 static constexpr const char* kPublicNativeLibrariesVendorConfig = "/vendor/etc/public.libraries.txt";
 
 class LibraryNamespaces {
@@ -95,10 +95,14 @@ class LibraryNamespaces {
 
   void Initialize() {
     std::vector<std::string> sonames;
+    const char* android_root_env = getenv("ANDROID_ROOT");
+    std::string root_dir = android_root_env != nullptr ? android_root_env : "/system";
+    std::string public_native_libraries_system_config =
+            root_dir + kPublicNativeLibrariesSystemConfigPathFromRoot;
 
-    LOG_ALWAYS_FATAL_IF(!ReadConfig(kPublicNativeLibrariesSystemConfig, &sonames),
+    LOG_ALWAYS_FATAL_IF(!ReadConfig(public_native_libraries_system_config, &sonames),
                         "Error reading public native library list from \"%s\": %s",
-                        kPublicNativeLibrariesSystemConfig, strerror(errno));
+                        public_native_libraries_system_config.c_str(), strerror(errno));
     // This file is optional, quietly ignore if the file does not exist.
     ReadConfig(kPublicNativeLibrariesVendorConfig, &sonames);
 
@@ -159,10 +163,6 @@ class LibraryNamespaces {
 
 static std::mutex g_namespaces_mutex;
 static LibraryNamespaces* g_namespaces = new LibraryNamespaces;
-
-static bool namespaces_enabled(uint32_t target_sdk_version) {
-  return target_sdk_version > 0;
-}
 #endif
 
 void InitializeNativeLoader() {
@@ -180,10 +180,7 @@ jstring CreateClassLoaderNamespace(JNIEnv* env,
                                    jstring library_path,
                                    jstring permitted_path) {
 #if defined(__ANDROID__)
-  if (!namespaces_enabled(target_sdk_version)) {
-    return nullptr;
-  }
-
+  UNUSED(target_sdk_version);
   std::lock_guard<std::mutex> guard(g_namespaces_mutex);
   android_namespace_t* ns = g_namespaces->Create(env,
                                                  class_loader,
@@ -206,7 +203,8 @@ void* OpenNativeLibrary(JNIEnv* env,
                         jobject class_loader,
                         jstring library_path) {
 #if defined(__ANDROID__)
-  if (!namespaces_enabled(target_sdk_version) || class_loader == nullptr) {
+  UNUSED(target_sdk_version);
+  if (class_loader == nullptr) {
     return dlopen(path, RTLD_NOW);
   }
 
