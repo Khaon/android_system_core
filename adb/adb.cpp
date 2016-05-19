@@ -65,21 +65,34 @@ std::string adb_version() {
 void fatal(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "error: ");
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+
+#if ADB_HOST
+    fprintf(stderr, "error: %s\n", buf);
+#else
+    LOG(ERROR) << "error: " << buf;
+#endif
+
     va_end(ap);
-    exit(-1);
+    abort();
 }
 
 void fatal_errno(const char* fmt, ...) {
+    int err = errno;
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "error: %s: ", strerror(errno));
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+
+#if ADB_HOST
+    fprintf(stderr, "error: %s: %s\n", buf, strerror(err));
+#else
+    LOG(ERROR) << "error: " << buf << ": " << strerror(err);
+#endif
+
     va_end(ap);
-    exit(-1);
+    abort();
 }
 
 apacket* get_apacket(void)
@@ -955,18 +968,25 @@ int handle_forward_request(const char* service, TransportType type, const char* 
 
         std::string error;
         InstallStatus r;
+        int resolved_tcp_port = 0;
         if (kill_forward) {
             r = remove_listener(pieces[0].c_str(), transport);
         } else {
-            r = install_listener(pieces[0], pieces[1].c_str(), transport,
-                                 no_rebind, &error);
+            r = install_listener(pieces[0], pieces[1].c_str(), transport, no_rebind,
+                                 &resolved_tcp_port, &error);
         }
         if (r == INSTALL_STATUS_OK) {
 #if ADB_HOST
-            /* On the host: 1st OKAY is connect, 2nd OKAY is status */
+            // On the host: 1st OKAY is connect, 2nd OKAY is status.
             SendOkay(reply_fd);
 #endif
             SendOkay(reply_fd);
+
+            // If a TCP port was resolved, send the actual port number back.
+            if (resolved_tcp_port != 0) {
+                SendProtocolString(reply_fd, android::base::StringPrintf("%d", resolved_tcp_port));
+            }
+
             return 1;
         }
 

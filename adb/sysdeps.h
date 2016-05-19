@@ -29,8 +29,9 @@
 #include <string>
 #include <vector>
 
-// Include this before open/unlink are defined as macros below.
+// Include this before open/close/unlink are defined as macros below.
 #include <android-base/errors.h>
+#include <android-base/unique_fd.h>
 #include <android-base/utf8.h>
 
 /*
@@ -286,6 +287,9 @@ extern int  adb_socket_accept(int  serverfd, struct sockaddr*  addr, socklen_t  
 
 #undef   accept
 #define  accept  ___xxx_accept
+
+// Returns the local port number of a bound socket, or -1 on failure.
+int adb_socket_get_local_port(int fd);
 
 extern int  adb_setsockopt(int  fd, int  level, int  optname, const void*  optval, socklen_t  optlen);
 
@@ -690,6 +694,10 @@ static __inline__ int  adb_socket_accept(int  serverfd, struct sockaddr*  addr, 
 
 #undef   accept
 #define  accept  ___xxx_accept
+
+inline int adb_socket_get_local_port(int fd) {
+    return socket_get_local_port(fd);
+}
 
 // Operate on a file descriptor returned from unix_open() or a well-known file
 // descriptor such as STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO.

@@ -19,7 +19,7 @@
 
 #include <dlfcn.h>
 #ifdef __ANDROID__
-#include <android/dlext.h>
+#include "dlext_namespaces.h"
 #include "cutils/properties.h"
 #include "log/log.h"
 #endif
@@ -38,6 +38,11 @@ namespace android {
 #if defined(__ANDROID__)
 static constexpr const char* kPublicNativeLibrariesSystemConfigPathFromRoot = "/etc/public.libraries.txt";
 static constexpr const char* kPublicNativeLibrariesVendorConfig = "/vendor/etc/public.libraries.txt";
+
+// (http://b/27588281) This is a workaround for apps using custom classloaders and calling
+// System.load() with an absolute path which is outside of the classloader library search path.
+// This list includes all directories app is allowed to access this way.
+static constexpr const char* kWhitelistedDirectories = "/data:/mnt/expand";
 
 static bool is_debuggable() {
   char debuggable[PROP_VALUE_MAX];
@@ -61,10 +66,19 @@ class LibraryNamespaces {
       library_path = library_path_utf_chars.c_str();
     }
 
-    std::string permitted_path;
+    // (http://b/27588281) This is a workaround for apps using custom
+    // classloaders and calling System.load() with an absolute path which
+    // is outside of the classloader library search path.
+    //
+    // This part effectively allows such a classloader to access anything
+    // under /data and /mnt/expand
+    std::string permitted_path = kWhitelistedDirectories;
+
     if (java_permitted_path != nullptr) {
       ScopedUtfChars path(env, java_permitted_path);
-      permitted_path = path.c_str();
+      if (path.c_str() != nullptr && path.size() > 0) {
+        permitted_path = permitted_path + ":" + path.c_str();
+      }
     }
 
     if (!initialized_ && !InitPublicNamespace(library_path.c_str())) {
@@ -81,13 +95,14 @@ class LibraryNamespaces {
       namespace_type |= ANDROID_NAMESPACE_TYPE_SHARED;
     }
 
+    android_namespace_t* parent_ns = FindParentNamespaceByClassLoader(env, class_loader);
+
     ns = android_create_namespace("classloader-namespace",
                                   nullptr,
                                   library_path.c_str(),
                                   namespace_type,
-                                  java_permitted_path != nullptr ?
-                                      permitted_path.c_str() :
-                                      nullptr);
+                                  permitted_path.c_str(),
+                                  parent_ns);
 
     if (ns != nullptr) {
       namespaces_.push_back(std::make_pair(env->NewWeakGlobalRef(class_loader), ns));
@@ -105,6 +120,13 @@ class LibraryNamespaces {
   }
 
   void Initialize() {
+    // Once public namespace is initialized there is no
+    // point in running this code - it will have no effect
+    // on the current list of public libraries.
+    if (initialized_) {
+      return;
+    }
+
     std::vector<std::string> sonames;
     const char* android_root_env = getenv("ANDROID_ROOT");
     std::string root_dir = android_root_env != nullptr ? android_root_env : "/system";
@@ -179,6 +201,29 @@ class LibraryNamespaces {
     initialized_ = android_init_namespaces(public_libraries_.c_str(), library_path);
 
     return initialized_;
+  }
+
+  jobject GetParentClassLoader(JNIEnv* env, jobject class_loader) {
+    jclass class_loader_class = env->FindClass("java/lang/ClassLoader");
+    jmethodID get_parent = env->GetMethodID(class_loader_class,
+                                            "getParent",
+                                            "()Ljava/lang/ClassLoader;");
+
+    return env->CallObjectMethod(class_loader, get_parent);
+  }
+
+  android_namespace_t* FindParentNamespaceByClassLoader(JNIEnv* env, jobject class_loader) {
+    jobject parent_class_loader = GetParentClassLoader(env, class_loader);
+
+    while (parent_class_loader != nullptr) {
+      android_namespace_t* ns = FindNamespaceByClassLoader(env, parent_class_loader);
+      if (ns != nullptr) {
+        return ns;
+      }
+
+      parent_class_loader = GetParentClassLoader(env, parent_class_loader);
+    }
+    return nullptr;
   }
 
   bool initialized_;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2007 The Android Open Source Project
+ * Copyright (C) 2014 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,13 +14,13 @@
  * limitations under the License.
  */
 
-/*
- * Generate non-inlined versions of android_atomic functions.
- * Nobody should be using these, but some binary blobs currently (late 2014)
- * are.
- * If you read this in 2015 or later, please try to delete this file.
- */
+#ifndef _CANNED_FS_CONFIG_H
+#define _CANNED_FS_CONFIG_H
 
-#define ANDROID_ATOMIC_INLINE
+#include <inttypes.h>
 
-#include <cutils/atomic.h>
+int load_canned_fs_config(const char* fn);
+void canned_fs_config(const char* path, int dir, const char* target_out_path,
+                      unsigned* uid, unsigned* gid, unsigned* mode, uint64_t* capabilities);
+
+#endif

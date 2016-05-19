@@ -43,6 +43,7 @@
 #include <sys/wait.h>
 
 #include <android-base/file.h>
+#include <android-base/stringprintf.h>
 #include <cutils/list.h>
 #include <cutils/uevent.h>
 
@@ -130,49 +131,6 @@ int add_dev_perms(const char *name, const char *attr,
     return 0;
 }
 
-void fixup_sys_perms(const char *upath)
-{
-    char buf[512];
-    struct listnode *node;
-    struct perms_ *dp;
-
-    /* upaths omit the "/sys" that paths in this list
-     * contain, so we add 4 when comparing...
-     */
-    list_for_each(node, &sys_perms) {
-        dp = &(node_to_item(node, struct perm_node, plist))->dp;
-        if (dp->prefix) {
-            if (strncmp(upath, dp->name + 4, strlen(dp->name + 4)))
-                continue;
-        } else if (dp->wildcard) {
-            if (fnmatch(dp->name + 4, upath, FNM_PATHNAME) != 0)
-                continue;
-        } else {
-            if (strcmp(upath, dp->name + 4))
-                continue;
-        }
-
-        if ((strlen(upath) + strlen(dp->attr) + 6) > sizeof(buf))
-            break;
-
-        snprintf(buf, sizeof(buf), "/sys%s/%s", upath, dp->attr);
-        INFO("fixup %s %d %d 0%o\n", buf, dp->uid, dp->gid, dp->perm);
-        chown(buf, dp->uid, dp->gid);
-        chmod(buf, dp->perm);
-    }
-
-    // Now fixup SELinux file labels
-    int len = snprintf(buf, sizeof(buf), "/sys%s", upath);
-    if ((len < 0) || ((size_t) len >= sizeof(buf))) {
-        // Overflow
-        return;
-    }
-    if (access(buf, F_OK) == 0) {
-        INFO("restorecon_recursive: %s\n", buf);
-        restorecon_recursive(buf);
-    }
-}
-
 static bool perm_path_matches(const char *path, struct perms_ *dp)
 {
     if (dp->prefix) {
@@ -187,6 +145,44 @@ static bool perm_path_matches(const char *path, struct perms_ *dp)
     }
 
     return false;
+}
+
+static bool match_subsystem(perms_* dp, const char* pattern,
+                            const char* path, const char* subsystem) {
+    if (!pattern || !subsystem || strstr(dp->name, subsystem) == NULL) {
+        return false;
+    }
+
+    std::string subsys_path = android::base::StringPrintf(pattern, subsystem, basename(path));
+    return perm_path_matches(subsys_path.c_str(), dp);
+}
+
+static void fixup_sys_perms(const char* upath, const char* subsystem) {
+    // upaths omit the "/sys" that paths in this list
+    // contain, so we prepend it...
+    std::string path = std::string(SYSFS_PREFIX) + upath;
+
+    listnode* node;
+    list_for_each(node, &sys_perms) {
+        perms_* dp = &(node_to_item(node, perm_node, plist))->dp;
+        if (match_subsystem(dp, SYSFS_PREFIX "/class/%s/%s", path.c_str(), subsystem)) {
+            ; // matched
+        } else if (match_subsystem(dp, SYSFS_PREFIX "/bus/%s/devices/%s", path.c_str(), subsystem)) {
+            ; // matched
+        } else if (!perm_path_matches(path.c_str(), dp)) {
+            continue;
+        }
+
+        std::string attr_file = path + "/" + dp->attr;
+        INFO("fixup %s %d %d 0%o\n", attr_file.c_str(), dp->uid, dp->gid, dp->perm);
+        chown(attr_file.c_str(), dp->uid, dp->gid);
+        chmod(attr_file.c_str(), dp->perm);
+    }
+
+    if (access(path.c_str(), F_OK) == 0) {
+        INFO("restorecon_recursive: %s\n", path.c_str());
+        restorecon_recursive(path.c_str());
+    }
 }
 
 static mode_t get_device_perm(const char *path, const char **links,
@@ -747,7 +743,7 @@ static void handle_generic_device_event(struct uevent *uevent)
 static void handle_device_event(struct uevent *uevent)
 {
     if (!strcmp(uevent->action,"add") || !strcmp(uevent->action, "change") || !strcmp(uevent->action, "online"))
-        fixup_sys_perms(uevent->path);
+        fixup_sys_perms(uevent->path, uevent->subsystem);
 
     if (!strncmp(uevent->subsystem, "block", 5)) {
         handle_block_device_event(uevent);
