@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2016 The Android Open-Source Project
+# Copyright (C) 2015 The Android Open-Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,24 +18,20 @@ LOCAL_PATH:= $(call my-dir)
 
 include $(CLEAR_VARS)
 
-LOCAL_MODULE := storageproxyd
-
-LOCAL_C_INCLUDES += bionic/libc/kernel/uapi
+LOCAL_MODULE := libtrustystorage
 
 LOCAL_SRC_FILES := \
-	ipc.c \
-	rpmb.c \
 	storage.c \
-	proxy.c
 
-LOCAL_CLFAGS = -Wall -Werror
+LOCAL_CLFAGS = -fvisibility=hidden -Wall -Werror
 
-LOCAL_SHARED_LIBRARIES := \
-	liblog \
+LOCAL_EXPORT_C_INCLUDE_DIRS := $(LOCAL_PATH)/include
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/include
 
 LOCAL_STATIC_LIBRARIES := \
-	libtrustystorageinterface \
-	libtrusty
+	liblog \
+	libtrusty \
+	libtrustystorageinterface
 
-include $(BUILD_EXECUTABLE)
+include $(BUILD_STATIC_LIBRARY)
 
